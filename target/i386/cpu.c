@@ -10665,7 +10665,7 @@ static bool x86_cpu_has_work(CPUState *cs)
      * KVM does; the guest's #VE handler returns and takes it.
      */
     if (env->tdx_hlt_wait && (cs->interrupt_request & CPU_INTERRUPT_HARD)) {
-        env->tdx_hlt_wait = false;
+        /* the flag stays until the CPU leaves the halt (x86_cpu_exec_halt) */
         return true;
     }
     return x86_cpu_pending_interrupt(cs, cs->interrupt_request) != 0;

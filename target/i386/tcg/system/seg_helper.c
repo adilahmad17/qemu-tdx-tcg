@@ -143,6 +143,7 @@ bool x86_cpu_exec_halt(CPUState *cpu)
     if (!cpu_has_work(cpu)) {
         return false;
     }
+    env->tdx_hlt_wait = false;      /* an emulated TD leaves its VMM halt */
 
     /* Complete HLT instruction.  */
     if (env->eflags & TF_MASK) {
