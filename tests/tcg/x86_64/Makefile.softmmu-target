@@ -34,6 +34,26 @@ memory: CFLAGS+=-DCHECK_UNALIGNED=1
 # Running
 QEMU_OPTS+=-device isa-debugcon,chardev=output -device isa-debug-exit,iobase=0xf4,iosize=0x4 -kernel
 
+# The emulated TDX guest test runs as a tdx-emu guest: a #VE handler forwards
+# the intercepted instructions to the VMM through TDG.VP.VMCALL. The test is
+# built without the red zone, as a guest that takes exceptions must be.
+tdx: CFLAGS+=-mno-red-zone
+# The TD starts at the firmware reset vector (no SeaBIOS: it is not a TD):
+# a 64 KiB stub built around the test ELF jumps to it; the generic loader
+# puts the ELF in RAM. The test binary that the generic rule appends
+# becomes the VM name.
+tdx-bios.bin: tdx $(X64_SYSTEM_SRC)/mktdxbios.py
+	$(PYTHON) $(X64_SYSTEM_SRC)/mktdxbios.py $< $@
+
+TDX_QEMU_OPTS=-M q35,confidential-guest-support=tdx0 -object tdx-emu,id=tdx0 \
+	-cpu max -smp 2 \
+	-device isa-debugcon,chardev=output -device isa-debug-exit,iobase=0xf4,iosize=0x4 \
+	-bios tdx-bios.bin -device loader,file=tdx -name
+run-tdx: tdx-bios.bin
+run-tdx: QEMU_OPTS=$(TDX_QEMU_OPTS)
+run-plugin-tdx-with-%: tdx-bios.bin
+run-plugin-tdx-with-%: QEMU_OPTS=$(TDX_QEMU_OPTS)
+
 ifeq ($(CONFIG_PLUGIN),y)
 run-plugin-patch-target-with-libpatch.so:		\
 	PLUGIN_ARGS=$(COMMA)target=ffc0$(COMMA)patch=9090$(COMMA)use_hwaddr=true
