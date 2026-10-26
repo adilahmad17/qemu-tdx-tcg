@@ -292,6 +292,18 @@ int main(void)
 #endif
     ml_printf("tdx-mem: emulated TDX memory test\n");
 
+    /* the default TD: topology enumeration on (x2APIC id without a #VE) */
+    {
+        uint32_t lo, hi, a, b, c, d;
+
+        before = ve_counts[31];
+        asm volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(0x802));
+        asm volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d)
+                     : "a"(0xb), "c"(0));
+        CHECK(ve_counts[31] == before && ve_counts[10] == 0 && lo == 0 && d == 0,
+              "enum-topology (default on): MSR 0x802 and CPUID.0xB give the x2APIC id, no #VE");
+    }
+
     /* a shared region: MapGPA, then mapped with the shared bit */
     st = map_gpa(REGION_A | SHARED_BIT, 0x200000);
     CHECK(st == 0, "MapGPA of region A to shared");

@@ -51,10 +51,11 @@ TDX_QEMU_OPTS=-M q35,confidential-guest-support=tdx0 -cpu max -smp 2 \
 	-device isa-debugcon,chardev=output -device isa-debug-exit,iobase=0xf4,iosize=0x4
 
 run-tdx: tdx-bios.bin
-run-tdx: QEMU_OPTS=$(TDX_QEMU_OPTS) -object tdx-emu,id=tdx0 \
+# tdx checks the TD_CTLS controls from the public module's initial state
+run-tdx: QEMU_OPTS=$(TDX_QEMU_OPTS) -object tdx-emu,id=tdx0,enum-topology=off \
 	-bios tdx-bios.bin -device loader,file=tdx -name
 run-plugin-tdx-with-%: tdx-bios.bin
-run-plugin-tdx-with-%: QEMU_OPTS=$(TDX_QEMU_OPTS) -object tdx-emu,id=tdx0 \
+run-plugin-tdx-with-%: QEMU_OPTS=$(TDX_QEMU_OPTS) -object tdx-emu,id=tdx0,enum-topology=off \
 	-bios tdx-bios.bin -device loader,file=tdx -name
 
 # the memory test takes the #VEs that a strict TD would stop on

@@ -68,6 +68,7 @@ struct TdxEmuState {
     uint32_t gpaw;              /* guest physical address width: 48 or 52 */
     uint64_t attributes;        /* TD attributes reported by TDG.VP.INFO */
     bool strict;                /* stop the VM on what would kill a real TD */
+    bool enum_topology;         /* TD_CTLS.ENUM_TOPOLOGY set at creation */
 
     /* TD-scope metadata (TDCS fields the guest may read or write) */
     uint64_t notify_enables;    /* TDCS.NOTIFY_ENABLES */

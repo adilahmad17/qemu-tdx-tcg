@@ -1180,8 +1180,13 @@
 #
 # @debug: set the DEBUG attribute (default: false)
 #
-# @strict: stop the VM on a protocol violation instead of failing the
-#     call (default: true)
+# @strict: stop the VM on what would kill a real TD, an access to a
+#     page it has not accepted for example (default: true)
+#
+# @enum-topology: set TD_CTLS.ENUM_TOPOLOGY at creation, so that the
+#     TD reads its x2APIC id from MSR 0x802 and CPUID 0xB without a
+#     \#VE (default: true; false is the public TDX module's initial
+#     state)
 #
 # Since: 11.1
 ##
@@ -1189,7 +1194,8 @@
   'data': { '*gpaw': 'uint32',
             '*sept-ve-disable': 'bool',
             '*debug': 'bool',
-            '*strict': 'bool' } }
+            '*strict': 'bool',
+            '*enum-topology': 'bool' } }
 
 ##
 # @ThreadContextProperties:

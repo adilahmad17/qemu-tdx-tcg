@@ -635,6 +635,29 @@ static bool tdx_emu_get_strict(Object *obj, Error **errp)
     return TDX_EMU(obj)->strict;
 }
 
+static bool tdx_emu_get_enum_topology(Object *obj, Error **errp)
+{
+    return TDX_EMU(obj)->enum_topology;
+}
+
+/*
+ * The platform the Saguaro TDX PAL runs on gives the TD its x2APIC ids
+ * through MSR 0x802 and CPUID 0xB without the TD asking for it, which in the
+ * public module source needs TD_CTLS.ENUM_TOPOLOGY: it is on at creation by
+ * default here; enum-topology=off is the public module's initial state.
+ */
+static void tdx_emu_set_enum_topology(Object *obj, bool value, Error **errp)
+{
+    TdxEmuState *tdx = TDX_EMU(obj);
+
+    tdx->enum_topology = value;
+    if (value) {
+        tdx->td_ctls |= TDX_TD_CTLS_ENUM_TOPOLOGY;
+    } else {
+        tdx->td_ctls &= ~TDX_TD_CTLS_ENUM_TOPOLOGY;
+    }
+}
+
 static void tdx_emu_set_strict(Object *obj, bool value, Error **errp)
 {
     TDX_EMU(obj)->strict = value;
@@ -646,7 +669,8 @@ static void tdx_emu_init(Object *obj)
 
     tdx->gpaw = 52;
     tdx->attributes = TDX_EMU_ATTR_SEPT_VE_DISABLE;
-    tdx->td_ctls = TDX_TD_CTLS_PENDING_VE_DISABLE;
+    tdx->td_ctls = TDX_TD_CTLS_PENDING_VE_DISABLE | TDX_TD_CTLS_ENUM_TOPOLOGY;
+    tdx->enum_topology = true;
     tdx->strict = true;
     tdx->event_notify_vector = -1;
     tdx->event_notify_apicid = -1;
@@ -674,6 +698,12 @@ static void tdx_emu_class_init(ObjectClass *oc, const void *data)
                                    tdx_emu_set_strict);
     object_class_property_set_description(oc, "strict",
         "stop the VM on what would kill a real TD (default on)");
+    object_class_property_add_bool(oc, "enum-topology",
+                                   tdx_emu_get_enum_topology,
+                                   tdx_emu_set_enum_topology);
+    object_class_property_set_description(oc, "enum-topology",
+        "TD_CTLS.ENUM_TOPOLOGY at creation: x2APIC ids through MSR 0x802 and "
+        "CPUID 0xB (default on; off is the public module's initial state)");
 }
 
 static const TypeInfo tdx_emu_info = {
