@@ -21,3 +21,4 @@ tdx_emu_tdcall(uint32_t leaf, uint64_t status) "leaf %u status 0x%" PRIx64
 tdx_emu_vmcall(uint64_t leaf, uint64_t type) "sub-function 0x%" PRIx64 " type 0x%" PRIx64
 tdx_emu_ve(uint32_t reason, uint64_t qual, uint32_t len, uint8_t category) "exit reason %u qualification 0x%" PRIx64 " length %u category 0x%x"
 tdx_emu_access(uint64_t paddr, bool shared, bool is_ram, uint8_t state) "GPA 0x%" PRIx64 " shared %d ram %d state %u"
+tdx_emu_tsc_deadline(uint64_t deadline, uint64_t now, uint64_t khz, uint64_t ns) "deadline 0x%" PRIx64 " now 0x%" PRIx64 " khz %" PRIu64 " ns %" PRIu64

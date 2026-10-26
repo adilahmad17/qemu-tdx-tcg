@@ -143,6 +143,11 @@ void tdx_emu_cpuid(CPUX86State *env, uint32_t index, uint32_t count,
         *ecx |= tdx_emu_fixed1_bits(cpu, FEAT_1_ECX);
         *edx |= tdx_emu_fixed1_bits(cpu, FEAT_1_EDX);
         *ecx &= ~CPUID_EXT_MONITOR;         /* fixed 0: MONITOR/MWAIT #UD */
+        /*
+         * The module passes the platform's TSC-deadline bit through, and the
+         * TDX platforms have the timer: the VMM serves IA32_TSC_DEADLINE.
+         */
+        *ecx |= CPUID_EXT_TSC_DEADLINE_TIMER;
         break;
     case 2:
         if (td_ctls & TDX_TD_CTLS_VIRT_CPUID2) {

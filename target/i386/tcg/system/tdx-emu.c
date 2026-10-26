@@ -445,6 +445,31 @@ static uint64_t tdx_emu_gpa_mask(void)
 }
 
 /*
+ * IA32_TSC_DEADLINE through the VMM, as KVM's local APIC serves it for a TD:
+ * the deadline (a guest TSC value) arms the vCPU's LAPIC timer. TCG's APIC
+ * has no deadline mode, so the VMM programs its one-shot count (which counts
+ * nanoseconds with the divider at 1) with the time left at the TD's TSC rate;
+ * the LVT timer entry (vector, mode bits) is the guest's.
+ */
+static void tdx_emu_vmm_tsc_deadline(CPUX86State *env, uint64_t deadline)
+{
+    uint64_t khz = tdx_emu_state->tsc_khz ? tdx_emu_state->tsc_khz : 1000000;
+    uint64_t now = cpu_get_tsc(env) + env->tsc_offset;
+    uint64_t ns = 0;
+
+    env->tdx_tsc_deadline = deadline;
+    if (deadline) {
+        uint64_t ticks = deadline > now ? deadline - now : 1;
+
+        ns = MAX(ticks * 1000000 / khz, 1);
+        ns = MIN(ns, 0xffffffffULL);
+    }
+    trace_tdx_emu_tsc_deadline(deadline, now, khz, ns);
+    x86_wrmsr_core(env, 0x83e, 0xb);                /* DCR: divide by 1 */
+    x86_wrmsr_core(env, 0x838, ns);                 /* TMICT: 0 disarms */
+}
+
+/*
  * r[] is the VMM's view of the guest GPRs (unselected ones read as zero);
  * the handler writes its outputs into it and returns the R10 status.
  */
@@ -529,8 +554,14 @@ static uint64_t tdx_emu_vmcall(CPUX86State *env, uint64_t *r, int insn_len)
 
         /* the VMM emulates the MSR in the host: QEMU's MSR core, no #GP */
         if (r[R_R12] > 0xffffffffULL ||
-            !tdx_emu_vmm_msr_allowed(r[R_R12], false) ||
-            !x86_rdmsr_core(env, r[R_R12], &val)) {
+            !tdx_emu_vmm_msr_allowed(r[R_R12], false)) {
+            return TDVMCALL_STATUS_INVALID_OPERAND;
+        }
+        if (r[R_R12] == 0x6e0) {
+            r[R_R11] = env->tdx_tsc_deadline;
+            return TDVMCALL_STATUS_SUCCESS;
+        }
+        if (!x86_rdmsr_core(env, r[R_R12], &val)) {
             return TDVMCALL_STATUS_INVALID_OPERAND;
         }
         r[R_R11] = val;
@@ -542,6 +573,10 @@ static uint64_t tdx_emu_vmcall(CPUX86State *env, uint64_t *r, int insn_len)
         if (r[R_R12] > 0xffffffffULL ||
             !tdx_emu_vmm_msr_allowed(index, true)) {
             return TDVMCALL_STATUS_INVALID_OPERAND;
+        }
+        if (index == 0x6e0) {
+            tdx_emu_vmm_tsc_deadline(env, r[R_R13]);
+            return TDVMCALL_STATUS_SUCCESS;
         }
         if (index == 0x830) {
             unsigned dm = (r[R_R13] >> 8) & 7;

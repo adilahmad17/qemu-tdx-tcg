@@ -471,6 +471,26 @@ int main(void)
           "HLT raised a #VE with instruction length 1 and the VMM resumed us");
     wrmsr(0x832, 0x10020);                  /* mask the timer again */
 
+    /* the TSC-deadline timer: CPUID says so, the VMM serves IA32_TSC_DEADLINE */
+    cpuid(1, 0, &a, &b, &c, &d);
+    CHECK(c & (1 << 24), "CPUID.1: TSC-deadline timer available");
+    wrmsr(0x832, 0x20 | 0x40000);           /* LVT timer: deadline mode, vector 32 */
+    {
+        uint32_t lo, hi;
+        uint64_t tsc, dl;
+
+        asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
+        tsc = ((uint64_t)hi << 32) | lo;
+        dl = tsc + 20000000;                /* some milliseconds */
+        before = ve_counts[EXIT_REASON_HLT];
+        wrmsr(0x6e0, dl);
+        asm volatile("hlt");
+        CHECK(ve_counts[EXIT_REASON_HLT] == before + 1 && rdmsr(0x6e0) == dl,
+              "IA32_TSC_DEADLINE through the VMM armed the timer and reads back");
+        wrmsr(0x6e0, 0);
+    }
+    wrmsr(0x832, 0x10020);                  /* mask the timer again */
+
     /* IN: the VMM reads the port (0xe9 debugcon reads back 0xe9) */
     before = ve_counts[EXIT_REASON_IO];
     uint8_t inb;

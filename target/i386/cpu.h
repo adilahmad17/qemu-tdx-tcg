@@ -2230,6 +2230,7 @@ typedef struct CPUArchState {
         uint8_t category;
     } tdx_ve;
     bool tdx_hlt_wait;          /* halted by TDG.VP.VMCALL<Instruction.HLT> */
+    uint64_t tdx_tsc_deadline;  /* IA32_TSC_DEADLINE, served by the VMM */
     uint8_t tdx_cpuid_ve;       /* bit 0: supervisor, bit 1: user */
 
     /* Fields up to this point are cleared by a CPU reset */
