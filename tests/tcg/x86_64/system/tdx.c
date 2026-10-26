@@ -508,12 +508,13 @@ int main(void)
     CHECK(r.rax == TDX_SUCCESS && r.r8 == 0, "TDG.VP.RD VCPU_INDEX is 0");
 
     /* TDG.MEM.PAGE.ACCEPT */
+    /* no firmware: the VMM added every page at launch */
     r = (struct tdcall_regs){ .rax = TDG_MEM_PAGE_ACCEPT, .rcx = 0x200000 };
     tdcall(&r);
-    CHECK(r.rax == TDX_SUCCESS, "TDG.MEM.PAGE.ACCEPT of a 4K page");
+    CHECK(r.rax == 0x00000B0A00000000ULL, "TDG.MEM.PAGE.ACCEPT of an added 4K page: PAGE_ALREADY_ACCEPTED");
     r = (struct tdcall_regs){ .rax = TDG_MEM_PAGE_ACCEPT, .rcx = 0x200000 | 1 };
     tdcall(&r);
-    CHECK(r.rax == TDX_SUCCESS, "TDG.MEM.PAGE.ACCEPT of a 2M page");
+    CHECK(r.rax == 0xC0000B0B00000001ULL, "TDG.MEM.PAGE.ACCEPT of 2M over added 4K pages: PAGE_SIZE_MISMATCH");
     r = (struct tdcall_regs){ .rax = TDG_MEM_PAGE_ACCEPT, .rcx = 0x201000 | 1 };
     tdcall(&r);
     CHECK(r.rax == (TDX_OPERAND_INVALID | 1), "TDG.MEM.PAGE.ACCEPT of a misaligned 2M page: OPERAND_INVALID");

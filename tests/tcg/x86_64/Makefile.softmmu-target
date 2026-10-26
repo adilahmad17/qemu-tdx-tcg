@@ -34,25 +34,71 @@ memory: CFLAGS+=-DCHECK_UNALIGNED=1
 # Running
 QEMU_OPTS+=-device isa-debugcon,chardev=output -device isa-debug-exit,iobase=0xf4,iosize=0x4 -kernel
 
-# The emulated TDX guest test runs as a tdx-emu guest: a #VE handler forwards
-# the intercepted instructions to the VMM through TDG.VP.VMCALL. The test is
-# built without the red zone, as a guest that takes exceptions must be.
-tdx: CFLAGS+=-mno-red-zone
-# The TD starts at the firmware reset vector (no SeaBIOS: it is not a TD):
-# a 64 KiB stub built around the test ELF jumps to it; the generic loader
-# puts the ELF in RAM. The test binary that the generic rule appends
-# becomes the VM name.
-tdx-bios.bin: tdx $(X64_SYSTEM_SRC)/mktdxbios.py
+# The emulated TDX guest tests run as tdx-emu guests: a #VE handler forwards
+# the intercepted instructions to the VMM through TDG.VP.VMCALL. A TD starts
+# at the firmware reset vector (no SeaBIOS: it is not a TD), so a 64 KiB stub
+# built around each test ELF jumps to it and the generic loader puts the ELF in
+# RAM. The tests are built without the red zone, as a guest that takes
+# exceptions must be. The test binary that the generic rule appends becomes
+# the VM name.
+TDX_TESTS=tdx tdx-mem tdx-mem-strict
+$(TDX_TESTS): CFLAGS+=-mno-red-zone
+
+%-bios.bin: % $(X64_SYSTEM_SRC)/mktdxbios.py
 	$(PYTHON) $(X64_SYSTEM_SRC)/mktdxbios.py $< $@
 
-TDX_QEMU_OPTS=-M q35,confidential-guest-support=tdx0 -object tdx-emu,id=tdx0 \
-	-cpu max -smp 2 \
-	-device isa-debugcon,chardev=output -device isa-debug-exit,iobase=0xf4,iosize=0x4 \
-	-bios tdx-bios.bin -device loader,file=tdx -name
+TDX_QEMU_OPTS=-M q35,confidential-guest-support=tdx0 -cpu max -smp 2 \
+	-device isa-debugcon,chardev=output -device isa-debug-exit,iobase=0xf4,iosize=0x4
+
 run-tdx: tdx-bios.bin
-run-tdx: QEMU_OPTS=$(TDX_QEMU_OPTS)
+run-tdx: QEMU_OPTS=$(TDX_QEMU_OPTS) -object tdx-emu,id=tdx0 \
+	-bios tdx-bios.bin -device loader,file=tdx -name
 run-plugin-tdx-with-%: tdx-bios.bin
-run-plugin-tdx-with-%: QEMU_OPTS=$(TDX_QEMU_OPTS)
+run-plugin-tdx-with-%: QEMU_OPTS=$(TDX_QEMU_OPTS) -object tdx-emu,id=tdx0 \
+	-bios tdx-bios.bin -device loader,file=tdx -name
+
+# the memory test takes the #VEs that a strict TD would stop on
+run-tdx-mem: tdx-mem-bios.bin
+run-tdx-mem: QEMU_OPTS=$(TDX_QEMU_OPTS) \
+	-object tdx-emu,id=tdx0,strict=off,sept-ve-disable=off \
+	-bios tdx-mem-bios.bin -device loader,file=tdx-mem -name
+run-plugin-tdx-mem-with-%: tdx-mem-bios.bin
+run-plugin-tdx-mem-with-%: QEMU_OPTS=$(TDX_QEMU_OPTS) \
+	-object tdx-emu,id=tdx0,strict=off,sept-ve-disable=off \
+	-bios tdx-mem-bios.bin -device loader,file=tdx-mem -name
+
+# a strict TD stops (exit status 1, a message) on an access to a pending page
+run-tdx-mem-strict: tdx-mem-strict tdx-mem-strict-bios.bin
+	$(call run-test, $@, $(X64_SYSTEM_SRC)/tdx-expect-stop.sh "has not accepted" \
+		$(QEMU) -monitor none -display none \
+		-chardev file$(COMMA)path=$@.out$(COMMA)id=output $(TDX_QEMU_OPTS) \
+		-object tdx-emu$(COMMA)id=tdx0 -bios tdx-mem-strict-bios.bin \
+		-device loader$(COMMA)file=tdx-mem-strict -name $@)
+run-plugin-tdx-mem-strict-with-%:
+	@true
+
+# td-shim boots the emulated TD from its firmware image and hands over to a
+# payload (tdx-payload.c, a position-independent ELF that td-shim relocates);
+# the image is linked with td-shim-ld from a td-shim build: set TD_SHIM_DIR
+# (the x86_64-unknown-none release directory with ResetVector.bin and
+# td-shim) and TD_SHIM_LD (the td-shim-ld binary). The serial console goes
+# through td-shim's #VE handler.
+TD_SHIM_DIR ?=
+TD_SHIM_LD ?= td-shim-ld
+tdx-payload: $(X64_SYSTEM_SRC)/tdx-payload.c
+	$(CC) -fPIE -static-pie -nostdlib -ffreestanding -fno-stack-protector \
+		-mno-red-zone -O2 -Wall -o $@ $<
+tdx-shim: tdx-payload
+	$(TD_SHIM_LD) $(TD_SHIM_DIR)/ResetVector.bin $(TD_SHIM_DIR)/td-shim \
+		-t executable -p $< -o $@
+run-tdx-shim: QEMU_OPTS=-M q35,confidential-guest-support=tdx0 -object tdx-emu,id=tdx0 \
+	-cpu max,phys-bits=52 -smp 2 -m 512M -serial chardev:output \
+	-device isa-debug-exit,iobase=0xf4,iosize=0x4 -bios tdx-shim -name
+run-plugin-tdx-shim-with-%:
+	@true
+ifneq ($(TD_SHIM_DIR),)
+TESTS+=tdx-shim
+endif
 
 ifeq ($(CONFIG_PLUGIN),y)
 run-plugin-patch-target-with-libpatch.so:		\

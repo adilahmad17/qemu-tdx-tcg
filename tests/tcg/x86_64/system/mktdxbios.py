@@ -5,7 +5,7 @@
 # tests. A TD starts in 32-bit flat protected mode at 0xFFFFFFF0 (the last 16
 # bytes of the image, mapped below 4 GiB); the stub there jumps to the test
 # ELF's entry, which the generic loader (-device loader,file=ELF) places in
-# RAM. For every vCPU but the first (RSI = vCPU index), it halts.
+# RAM. Every vCPU but the first (RSI = vCPU index) spins.
 import struct
 import sys
 
@@ -45,12 +45,14 @@ size = 0x10000
 base = 0x100000000 - size
 img = bytearray(size)
 code_at = base + 0xff80
-# 32-bit code: test %esi,%esi; jnz 1f; jmp entry; 1: hlt; jmp 1b
+# 32-bit code: test %esi,%esi; jnz 1f; jmp entry; 1: pause; jmp 1b
+# (every vCPU of a TD runs from the reset vector; the others spin: a HLT
+# would be a #VE with no handler installed yet)
 code = bytearray(b'\x85\xf6')                  # test %esi,%esi
 code += b'\x75\x05'                            # jnz +5 (over the jmp)
 rel = (entry - (code_at + len(code) + 5)) & 0xffffffff
 code += b'\xe9' + struct.pack('<I', rel)       # jmp entry
-code += b'\xf4\xeb\xfd'                        # 1: hlt; jmp 1b
+code += b'\xf3\x90\xeb\xfc'                    # 1: pause; jmp 1b
 img[0xff80:0xff80 + len(code)] = code
 # the reset vector: jmp to the stub (rel8 = 0xff80 - (0xfff0 + 2))
 img[0xfff0:0xfff2] = b'\xeb' + bytes([(0xff80 - 0xfff2) & 0xff])
