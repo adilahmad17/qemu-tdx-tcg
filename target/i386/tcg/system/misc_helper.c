@@ -28,6 +28,7 @@
 #include "exec/cputlb.h"
 #include "tcg/helper-tcg.h"
 #include "hw/i386/apic.h"
+#include "tdx-emu.h"
 
 void helper_outb(CPUX86State *env, uint32_t port, uint32_t data)
 {
@@ -90,6 +91,7 @@ void helper_write_crN(CPUX86State *env, int reg, target_ulong t0)
         cpu_x86_update_cr0(env, t0);
         break;
     case 3:
+        t0 = tdx_emu_convert_pte(t0);   /* an emulated TD: the shared bit */
         if ((env->efer & MSR_EFER_LMA) &&
                 (t0 & ((~0ULL) << env_archcpu(env)->phys_bits))) {
             cpu_vmexit(env, SVM_EXIT_ERR, 0, GETPC());

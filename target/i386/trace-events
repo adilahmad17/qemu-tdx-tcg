@@ -18,5 +18,6 @@ sev_handle_reset(void) ""
 
 # tdx-emu.c
 tdx_emu_tdcall(uint32_t leaf, uint64_t status) "leaf %u status 0x%" PRIx64
-tdx_emu_vmcall(uint64_t leaf, uint64_t status) "sub-function 0x%" PRIx64 " status 0x%" PRIx64
+tdx_emu_vmcall(uint64_t leaf, uint64_t type) "sub-function 0x%" PRIx64 " type 0x%" PRIx64
 tdx_emu_ve(uint32_t reason, uint64_t qual, uint32_t len, uint8_t category) "exit reason %u qualification 0x%" PRIx64 " length %u category 0x%x"
+tdx_emu_access(uint64_t paddr, bool shared, bool is_ram, uint8_t state) "GPA 0x%" PRIx64 " shared %d ram %d state %u"

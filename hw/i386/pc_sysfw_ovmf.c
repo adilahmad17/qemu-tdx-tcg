@@ -30,6 +30,7 @@
 #include "target/i386/cpu.h"
 #include "target/i386/sev.h"
 #include "kvm/tdx.h"
+#include "tdx-emu.h"
 
 #define OVMF_TABLE_FOOTER_GUID "96b582de-1fb2-45f7-baea-a366c55a082d"
 
@@ -191,5 +192,7 @@ void x86_firmware_configure(hwaddr gpa, void *ptr, int size)
             error_report("failed to parse TDVF for TDX VM");
             exit(1);
         }
+    } else if (tdx_emu_enabled()) {
+        tdx_emu_set_firmware(gpa, ptr, size);
     }
 }

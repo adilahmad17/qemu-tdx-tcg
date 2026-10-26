@@ -26,6 +26,7 @@
 #include "exec/target_page.h"
 #include "exec/tlb-flags.h"
 #include "tcg/helper-tcg.h"
+#include "tdx-emu.h"
 
 typedef struct TranslateParams {
     target_ulong addr;
@@ -40,6 +41,7 @@ typedef struct TranslateResult {
     hwaddr paddr;
     int prot;
     int page_size;
+    bool tdx_shared;    /* the leaf entry had the shared bit (emulated TD) */
 } TranslateResult;
 
 typedef enum TranslateFaultStage2 {
@@ -158,9 +160,12 @@ static bool mmu_translate(CPUX86State *env, const TranslateParams *in,
     int page_size;
     int error_code;
     int prot;
+    uint64_t pte_cbit = 0;  /* the C-bit of the leaf entry */
+    bool pte_shared = false; /* the shared bit of the leaf entry (TDX) */
 
  restart_all:
     rsvd_mask = ~MAKE_64BIT_MASK(0, env_archcpu(env)->phys_bits);
+    rsvd_mask = tdx_emu_convert_pte(rsvd_mask);
     rsvd_mask &= PG_ADDRESS_MASK;
     if (!(pg_mode & PG_MODE_NXE)) {
         rsvd_mask |= PG_NX_MASK;
@@ -179,6 +184,8 @@ static bool mmu_translate(CPUX86State *env, const TranslateParams *in,
                 }
             restart_5:
                 pte = ptw_ldq(&pte_trans, ra);
+                pte_shared = tdx_emu_pte_shared(pte);
+                pte = tdx_emu_convert_pte(pte);
                 if (!(pte & PG_PRESENT_MASK)) {
                     goto do_fault;
                 }
@@ -203,6 +210,8 @@ static bool mmu_translate(CPUX86State *env, const TranslateParams *in,
             }
         restart_4:
             pte = ptw_ldq(&pte_trans, ra);
+            pte_shared = tdx_emu_pte_shared(pte);
+            pte = tdx_emu_convert_pte(pte);
             if (!(pte & PG_PRESENT_MASK)) {
                 goto do_fault;
             }
@@ -223,6 +232,8 @@ static bool mmu_translate(CPUX86State *env, const TranslateParams *in,
             }
         restart_3_lma:
             pte = ptw_ldq(&pte_trans, ra);
+            pte_shared = tdx_emu_pte_shared(pte);
+            pte = tdx_emu_convert_pte(pte);
             if (!(pte & PG_PRESENT_MASK)) {
                 goto do_fault;
             }
@@ -251,6 +262,8 @@ static bool mmu_translate(CPUX86State *env, const TranslateParams *in,
             rsvd_mask |= PG_HI_USER_MASK;
         restart_3_nolma:
             pte = ptw_ldq(&pte_trans, ra);
+            pte_shared = tdx_emu_pte_shared(pte);
+            pte = tdx_emu_convert_pte(pte);
             if (!(pte & PG_PRESENT_MASK)) {
                 goto do_fault;
             }
@@ -272,6 +285,8 @@ static bool mmu_translate(CPUX86State *env, const TranslateParams *in,
         }
     restart_2_pae:
         pte = ptw_ldq(&pte_trans, ra);
+        pte_shared = tdx_emu_pte_shared(pte);
+        pte = tdx_emu_convert_pte(pte);
         if (!(pte & PG_PRESENT_MASK)) {
             goto do_fault;
         }
@@ -297,6 +312,8 @@ static bool mmu_translate(CPUX86State *env, const TranslateParams *in,
             return false;
         }
         pte = ptw_ldq(&pte_trans, ra);
+        pte_shared = tdx_emu_pte_shared(pte);
+        pte = tdx_emu_convert_pte(pte);
         if (!(pte & PG_PRESENT_MASK)) {
             goto do_fault;
         }
@@ -316,6 +333,8 @@ static bool mmu_translate(CPUX86State *env, const TranslateParams *in,
         }
     restart_2_nopae:
         pte = ptw_ldl(&pte_trans, ra);
+        pte_shared = tdx_emu_pte_shared(pte);
+        pte = tdx_emu_convert_pte(pte);
         if (!(pte & PG_PRESENT_MASK)) {
             goto do_fault;
         }
@@ -344,6 +363,8 @@ static bool mmu_translate(CPUX86State *env, const TranslateParams *in,
             return false;
         }
         pte = ptw_ldl(&pte_trans, ra);
+        pte_shared = tdx_emu_pte_shared(pte);
+        pte = tdx_emu_convert_pte(pte);
         if (!(pte & PG_PRESENT_MASK)) {
             goto do_fault;
         }
@@ -483,6 +504,7 @@ do_check_protect_pse36:
     out->paddr = paddr & x86_get_a20_mask(env);
     out->prot = prot;
     out->page_size = page_size;
+    out->tdx_shared = pte_shared;
     return true;
 
  do_fault_rsvd:
@@ -607,6 +629,7 @@ static bool get_physical_address(CPUX86State *env, vaddr addr,
     out->paddr = addr & x86_get_a20_mask(env);
     out->prot = PAGE_READ | PAGE_WRITE | PAGE_EXEC;
     out->page_size = TARGET_PAGE_SIZE;
+    out->tdx_shared = false;
     return true;
 }
 
@@ -620,6 +643,18 @@ bool x86_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
 
     if (get_physical_address(env, addr, access_type, mmu_idx, &out, &err,
                              retaddr)) {
+        if (tdx_emu_enabled() && mmu_idx != MMU_NESTED_IDX) {
+            /* an emulated TD: the Secure EPT and shared EPT checks */
+            int excp = tdx_emu_check_access(env, addr, out.paddr,
+                                            out.tdx_shared, access_type);
+
+            if (excp) {
+                if (probe) {
+                    return false;
+                }
+                raise_exception_err_ra(env, excp, 0, retaddr);
+            }
+        }
         /*
          * Even if 4MB pages, we map only one 4KB page in the cache to
          * avoid filling it too fast.

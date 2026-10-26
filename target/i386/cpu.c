@@ -9532,7 +9532,8 @@ static void x86_cpu_reset_hold(Object *obj, ResetType type)
     /* We hard-wire the BSP to the first CPU. */
     apic_designate_bsp(cpu->apic_state, cs->cpu_index == 0);
 
-    cs->halted = !cpu_is_bsp(cpu);
+    /* a TD has no INIT/SIPI: the VMM enters every vCPU at the reset vector */
+    cs->halted = !cpu_is_bsp(cpu) && !tdx_emu_enabled();
 
 #if defined(CONFIG_IGVM)
     if (cpu_is_bsp(cpu)) {

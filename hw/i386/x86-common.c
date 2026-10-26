@@ -44,6 +44,7 @@
 #include CONFIG_DEVICES
 #include "kvm/kvm_i386.h"
 #include "kvm/tdx.h"
+#include "tdx-emu.h"
 
 #ifdef CONFIG_XEN_EMU
 #include "hw/xen/xen.h"
@@ -1046,7 +1047,7 @@ static void load_bios_from_file(X86MachineState *x86ms, const char *bios_name,
         memory_region_init_ram(&x86ms->bios, NULL, "pc.bios",
                                bios_size, &error_fatal);
     }
-    if (sev_enabled() || is_tdx_vm()) {
+    if (sev_enabled() || is_tdx_vm() || tdx_emu_enabled()) {
         /*
          * The concept of a "reset" simply doesn't exist for
          * confidential computing guests, we have to destroy and
@@ -1106,7 +1107,7 @@ void x86_bios_rom_init(X86MachineState *x86ms, const char *default_firmware,
     bios_size = get_bios_size(x86ms, bios_name, filename);
     load_bios_from_file(x86ms, bios_name, filename, bios_size, isapc_ram_fw);
 
-    if (!machine_require_guest_memfd(MACHINE(x86ms))) {
+    if (!machine_require_guest_memfd(MACHINE(x86ms)) && !tdx_emu_enabled()) {
         /* map the last 128KB of the BIOS in ISA space */
         x86_isa_bios_init(&x86ms->isa_bios, rom_memory, &x86ms->bios,
                           !isapc_ram_fw);

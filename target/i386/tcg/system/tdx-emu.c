@@ -16,6 +16,8 @@
 #include "qemu/osdep.h"
 #include "qemu/log.h"
 #include "qemu/error-report.h"
+#include "qemu/units.h"
+#include "exec/target_page.h"
 #include "cpu.h"
 #include "exec/helper-proto.h"
 #include "accel/tcg/cpu-loop.h"
@@ -25,6 +27,7 @@
 #include "hw/core/boards.h"
 #include "hw/i386/apic.h"
 #include "crypto/hash.h"
+#include "exec/cputlb.h"
 #include "tcg/helper-tcg.h"
 #include "tdx-emu.h"
 #include "trace.h"
@@ -474,7 +477,6 @@ static uint64_t tdx_emu_vmcall(CPUX86State *env, uint64_t *r, int insn_len)
          * r12: interrupts blocked in the TD. The vCPU sleeps until an
          * interrupt is pending, whatever RFLAGS.IF says (x86_cpu_has_work).
          */
-        trace_tdx_emu_vmcall(leaf, TDVMCALL_STATUS_SUCCESS);
         env->eip += insn_len;
         do_end_instruction(env);
         env->tdx_hlt_wait = true;
@@ -585,14 +587,27 @@ static uint64_t tdx_emu_vmcall(CPUX86State *env, uint64_t *r, int insn_len)
         return TDVMCALL_STATUS_SUCCESS;
     case TDVMCALL_MAP_GPA: {
         uint64_t gpa = r[R_R12], size = r[R_R13];
+        bool shared = gpa & tdx_emu_shared_bit();
 
         if ((gpa & 0xfff) || (size & 0xfff)) {
             return TDVMCALL_STATUS_ALIGN_ERROR;
         }
+        gpa &= tdx_emu_gpa_mask();
+        if (gpa + size < gpa || gpa + size > tdx->pages_end) {
+            return TDVMCALL_STATUS_INVALID_OPERAND;
+        }
+        if (tdx->fw_size && gpa < tdx->fw_base + tdx->fw_size &&
+            gpa + size > tdx->fw_base) {
+            return TDVMCALL_STATUS_GPA_INUSE;     /* the firmware image */
+        }
         /*
-         * Shared/private conversion is bookkeeping only (no memory
-         * protection); the page-state table comes with the memory milestone.
+         * To shared: the host maps the pages (nothing to do without memory
+         * protection). To private: the pages are pending until accepted.
+         * Either way the TD's mappings of the range must be re-checked.
          */
+        tdx_emu_set_page_state(gpa, size,
+                               shared ? TDX_PAGE_SHARED : TDX_PAGE_PENDING);
+        tlb_flush_all_cpus_synced(env_cpu(env));
         return TDVMCALL_STATUS_SUCCESS;
     }
     case TDVMCALL_GET_QUOTE: {
@@ -660,8 +675,8 @@ static uint64_t tdg_vp_vmcall(CPUX86State *env, int insn_len)
     for (int i = 0; i < CPU_NB_REGS; i++) {
         r[i] = (select & (1u << i)) ? env->regs[i] : 0;
     }
+    trace_tdx_emu_vmcall(r[R_R11], r[R_R10]);
     status = tdx_emu_vmcall(env, r, insn_len);
-    trace_tdx_emu_vmcall(r[R_R11], status);
     r[R_R10] = status;
     for (int i = 0; i < CPU_NB_REGS; i++) {
         if (select & (1u << i)) {
@@ -723,19 +738,149 @@ static uint64_t tdg_vp_cpuidve_set(CPUX86State *env)
     return TDX_SUCCESS;
 }
 
-/* TDG.MEM.PAGE.ACCEPT: bookkeeping comes with the memory milestone */
+/*
+ * TDG.MEM.PAGE.ACCEPT: a pending private page (4 KiB, or 2 MiB of them)
+ * becomes accepted and is zero-filled, as the module does; an accepted one
+ * reports PAGE_ALREADY_ACCEPTED, a 2 MiB request over pages of mixed state
+ * PAGE_SIZE_MISMATCH. A shared page is not acceptable: the module takes a
+ * TD exit to the VMM, which stops a real TD (strict), or converts it.
+ */
 static uint64_t tdg_mem_page_accept(CPUX86State *env)
 {
     uint64_t rcx = env->regs[R_ECX];
     unsigned level = rcx & 7;
     uint64_t gpa = rcx & ~0xfffULL;
+    uint64_t size = level ? 2 * MiB : TARGET_PAGE_SIZE;
+    unsigned pending = 0, accepted_4k = 0, accepted_2m = 0, shared = 0;
+    g_autofree uint8_t *zero = NULL;
 
     if (level > 1 || (rcx & 0xff8) || (rcx >> 52) ||
         (level == 1 && (gpa & 0x1fffff)) ||
         (gpa & ~tdx_emu_gpa_mask())) {
         return TDX_OPERAND_INVALID | TDX_OPERAND_ID_RCX;
     }
+    if (gpa + size > tdx_emu_state->pages_end || !tdx_emu_gpa_is_ram(gpa)) {
+        return TDX_OPERAND_INVALID | TDX_OPERAND_ID_RCX;
+    }
+    for (uint64_t p = gpa; p < gpa + size; p += TARGET_PAGE_SIZE) {
+        switch (tdx_emu_page_state(p)) {
+        case TDX_PAGE_PENDING:
+            pending++;
+            break;
+        case TDX_PAGE_ACCEPTED:
+            accepted_4k++;
+            break;
+        case TDX_PAGE_ACCEPTED_2M:
+            accepted_2m++;
+            break;
+        default:
+            shared++;
+            break;
+        }
+    }
+    if (shared) {
+        if (tdx_emu_state->strict) {
+            tdx_emu_stop("tdx-emu: TDG.MEM.PAGE.ACCEPT of a shared page at GPA"
+                         " 0x%" PRIx64 " (the VMM would not map it private)",
+                         gpa);
+        }
+        pending += shared;
+    }
+    /*
+     * The status carries the Secure EPT level the walk reached: a 4 KiB page
+     * inside an accepted 2 MiB mapping reports level 1; a 2 MiB request over
+     * 4 KiB mappings finds a page table at level 1 (PAGE_SIZE_MISMATCH).
+     */
+    if (level == 0) {
+        if (accepted_2m) {
+            return TDX_PAGE_ALREADY_ACCEPTED | 1;
+        }
+        if (accepted_4k) {
+            return TDX_PAGE_ALREADY_ACCEPTED;
+        }
+    } else {
+        if (accepted_2m == 512) {
+            return TDX_PAGE_ALREADY_ACCEPTED | 1;
+        }
+        if (accepted_4k || accepted_2m) {
+            return TDX_PAGE_SIZE_MISMATCH | 1;
+        }
+    }
+    zero = g_malloc0(TARGET_PAGE_SIZE);
+    for (uint64_t p = gpa; p < gpa + size; p += TARGET_PAGE_SIZE) {
+        address_space_write(&address_space_memory, p, MEMTXATTRS_UNSPECIFIED,
+                            zero, TARGET_PAGE_SIZE);
+    }
+    tdx_emu_set_page_state(gpa, size,
+                           level ? TDX_PAGE_ACCEPTED_2M : TDX_PAGE_ACCEPTED);
     return TDX_SUCCESS;
+}
+
+/*
+ * The checks of the Secure EPT and the shared EPT at TLB fill, with the
+ * translated GPA and whether the TD's mapping has the shared bit: an access
+ * to MMIO through a shared mapping is the #VE the TD handles; the accesses
+ * that would make the module or the VMM kill a real TD (a private mapping of
+ * MMIO or of a shared page, a shared mapping of a private page, a pending
+ * private page with PENDING_VE_DISABLE) stop the VM when strict, and are a
+ * #VE otherwise. Returns the exception to raise, 0 for none.
+ */
+int tdx_emu_check_access(CPUX86State *env, vaddr addr, hwaddr paddr,
+                         bool shared, MMUAccessType access_type)
+{
+    TdxEmuState *tdx = tdx_emu_state;
+    bool is_ram = tdx_emu_gpa_is_ram(paddr);
+    uint8_t state = is_ram ? tdx_emu_page_state(paddr) : TDX_PAGE_PENDING;
+    uint64_t qual = access_type == MMU_DATA_STORE ? 2 :
+                    access_type == MMU_INST_FETCH ? 4 : 1;
+    uint8_t category = TDX_VE_CATEGORY_ARCH;
+    const char *what = NULL;
+
+    trace_tdx_emu_access(paddr, shared, is_ram, state);
+    if (shared) {
+        if (is_ram && state == TDX_PAGE_SHARED) {
+            return 0;
+        }
+        if (is_ram) {
+            what = "an access with the shared bit to a private page";
+        }
+        /* else MMIO: the #VE the TD expects */
+    } else if (!is_ram) {
+        what = "an access to MMIO without the shared bit";
+    } else if (state == TDX_PAGE_SHARED) {
+        what = "an access without the shared bit to a shared page";
+    } else if (state == TDX_PAGE_PENDING) {
+        if (tdx->td_ctls & TDX_TD_CTLS_PENDING_VE_DISABLE) {
+            what = "an access to a private page the TD has not accepted";
+        } else {
+            category = TDX_VE_CATEGORY_PENDING;
+        }
+    } else {
+        return 0;
+    }
+    if (what && tdx->strict) {
+        tdx_emu_stop("tdx-emu: %s: GPA 0x%" PRIx64 " (linear 0x%" PRIx64
+                     ", RIP 0x%" PRIx64 ")", what, (uint64_t)paddr,
+                     (uint64_t)addr, (uint64_t)env->eip);
+    }
+    if (what) {
+        qemu_log_mask(LOG_GUEST_ERROR, "tdx-emu: %s: GPA 0x%" PRIx64
+                      " (linear 0x%" PRIx64 "): #VE\n", what,
+                      (uint64_t)paddr, (uint64_t)addr);
+    }
+    trace_tdx_emu_ve(TDX_EXIT_REASON_EPT_VIOLATION, qual, 0, category);
+    if (env->tdx_ve.valid) {
+        return EXCP08_DBLE;
+    }
+    env->tdx_ve.valid = true;
+    env->tdx_ve.exit_reason = TDX_EXIT_REASON_EPT_VIOLATION;
+    env->tdx_ve.exit_qual = qual | (1 << 7);     /* GLA valid */
+    env->tdx_ve.gla = addr;
+    env->tdx_ve.gpa = paddr | (shared ? tdx_emu_shared_bit() : 0);
+    env->tdx_ve.instr_len = 0;
+    env->tdx_ve.instr_info = 0;
+    env->tdx_ve.category = category;
+    return EXCP14_VE;
 }
 
 /* RTMRs of the emulated TD: SHA-384, extended by TDG.MR.RTMR.EXTEND */

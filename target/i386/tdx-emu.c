@@ -1,6 +1,7 @@
 /*
  * QEMU Intel TDX guest emulation for TCG (tdx-emu): the object, the CPUID
- * virtualization and the initial vCPU state
+ * virtualization, the initial vCPU state, the page states and the launch
+ * from the TD firmware
  *
  * Copyright (C) 2026 The ASTERISC Research Lab
  *
@@ -10,15 +11,28 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "qapi/visitor.h"
+#include "qemu/error-report.h"
 #include "qemu/timer.h"
+#include "qemu/units.h"
+#include "exec/target_page.h"
 #include "qom/object_interfaces.h"
 #include "system/tcg.h"
+#include "system/system.h"
+#include "system/address-spaces.h"
+#include "system/memory.h"
+#include "standard-headers/uefi/uefi.h"
+#include "hw/i386/tdvf.h"
+#include "hw/i386/pc.h"
+#include "hw/i386/e820_memory_layout.h"
 #include "cpu.h"
 #include "hw/i386/apic.h"
 #include "confidential-guest.h"
 #include "tdx-emu.h"
 
 TdxEmuState *tdx_emu_state;
+
+/* the GUID of the TDVF metadata offset in the firmware's GUID table */
+#define TDX_METADATA_OFFSET_GUID "e47a6535-984a-4798-865e-4685a7bf8ec2"
 
 /*
  * The CPUID bits the TDX module fixes to 1 in every TD (the same list as the
@@ -267,6 +281,248 @@ void tdx_emu_apic_reset(X86CPU *cpu)
                       MSR_IA32_APICBASE_EXTD);
 }
 
+/* ---- page states, firmware and launch ---- */
+
+uint8_t tdx_emu_page_state(hwaddr gpa)
+{
+    TdxEmuState *tdx = tdx_emu_state;
+
+    if (!tdx->pages || gpa >= tdx->pages_end) {
+        /* nothing describes it: as memory the VMM added at launch */
+        return TDX_PAGE_ACCEPTED;
+    }
+    return tdx->pages[gpa >> TARGET_PAGE_BITS];
+}
+
+void tdx_emu_set_page_state(hwaddr gpa, uint64_t len, uint8_t state)
+{
+    TdxEmuState *tdx = tdx_emu_state;
+    uint64_t end = gpa + len;
+
+    if (!tdx->pages) {
+        return;
+    }
+    end = MIN(end, tdx->pages_end);
+    for (hwaddr p = gpa; p < end; p += TARGET_PAGE_SIZE) {
+        tdx->pages[p >> TARGET_PAGE_BITS] = state;
+    }
+}
+
+/*
+ * Guest RAM as the TD sees it: what the memory map (and so the TD HOB) calls
+ * RAM, plus the firmware image. The address space may show something else at
+ * a RAM address (the VGA window of the chipset over low RAM): on the real
+ * platform the private memory behind it still exists, so it counts as RAM.
+ */
+bool tdx_emu_gpa_is_ram(hwaddr gpa)
+{
+    TdxEmuState *tdx = tdx_emu_state;
+    MemoryRegion *mr;
+    hwaddr xlat, len = TARGET_PAGE_SIZE;
+    struct e820_entry *table;
+    int n = e820_get_table(&table);
+
+    if (tdx->fw_size && gpa >= tdx->fw_base &&
+        gpa < tdx->fw_base + tdx->fw_size) {
+        return true;
+    }
+    for (int i = 0; i < n; i++) {
+        uint64_t start = le64_to_cpu(table[i].address);
+
+        if (le32_to_cpu(table[i].type) == E820_RAM && gpa >= start &&
+            gpa < start + le64_to_cpu(table[i].length)) {
+            return true;
+        }
+    }
+    RCU_READ_LOCK_GUARD();
+    mr = address_space_translate(&address_space_memory, gpa, &xlat, &len,
+                                 false, MEMTXATTRS_UNSPECIFIED);
+    return memory_region_is_ram(mr);
+}
+
+G_NORETURN void tdx_emu_stop(const char *fmt, ...)
+{
+    va_list ap;
+
+    va_start(ap, fmt);
+    error_vreport(fmt, ap);
+    va_end(ap);
+    error_report("tdx-emu: the TD did what a real TDX module or VMM would "
+                 "not survive; stopping (strict=off continues)");
+    exit(1);
+}
+
+/*
+ * The TD firmware was loaded with -bios into RAM below 4 GiB: keep its TDVF
+ * metadata (td-shim and TDVF carry one) for the launch.
+ */
+void tdx_emu_set_firmware(hwaddr base, void *ptr, int size)
+{
+    TdxEmuState *tdx = tdx_emu_state;
+    TdxFirmware *fw = g_new0(TdxFirmware, 1);
+
+    tdx->fw_base = base;
+    tdx->fw_size = size;
+    if (!pc_system_ovmf_table_find(TDX_METADATA_OFFSET_GUID, NULL, NULL) ||
+        tdvf_parse_metadata(fw, ptr, size) < 0) {
+        warn_report("tdx-emu: the firmware has no TDVF metadata: all memory "
+                    "is treated as added at launch");
+        g_free(fw);
+        return;
+    }
+    fw->mem_ptr = ptr;
+    tdx->fw = fw;
+}
+
+/*
+ * The TD HOB the VMM hands to the firmware: the handoff table, one resource
+ * descriptor per range of guest RAM (unaccepted, except the ranges the launch
+ * adds: the HOB itself and the temporary memory) and the end marker; what
+ * td-shim and TDVF expect from KVM's QEMU.
+ */
+static void tdx_emu_hob_add(GByteArray *hob, const void *data, size_t len)
+{
+    g_byte_array_append(hob, data, len);
+    while (hob->len & 7) {
+        g_byte_array_append(hob, (const guint8 *)"", 1);
+    }
+}
+
+static void tdx_emu_hob_resource(GByteArray *hob, uint64_t start, uint64_t len,
+                                 uint32_t type)
+{
+    EFI_HOB_RESOURCE_DESCRIPTOR r = {
+        .Header = { .HobType = EFI_HOB_TYPE_RESOURCE_DESCRIPTOR,
+                    .HobLength = cpu_to_le16(sizeof(r)) },
+        .Owner = EFI_HOB_OWNER_ZERO,
+        .ResourceType = cpu_to_le32(type),
+        .ResourceAttribute = cpu_to_le32(EFI_RESOURCE_ATTRIBUTE_PRESENT |
+                                         EFI_RESOURCE_ATTRIBUTE_INITIALIZED |
+                                         EFI_RESOURCE_ATTRIBUTE_TESTED),
+        .PhysicalStart = cpu_to_le64(start),
+        .ResourceLength = cpu_to_le64(len),
+    };
+
+    if (len) {
+        tdx_emu_hob_add(hob, &r, sizeof(r));
+    }
+}
+
+/* a RAM range of the e820 map, cut around the ranges added at launch */
+static void tdx_emu_hob_ram(GByteArray *hob, TdxFirmware *fw, uint64_t start,
+                            uint64_t end)
+{
+    TdxFirmwareEntry *e;
+    uint64_t cut = end;
+    TdxFirmwareEntry *first = NULL;
+
+    /* the lowest added range inside [start, end) */
+    for_each_tdx_fw_entry(fw, e) {
+        if ((e->type == TDVF_SECTION_TYPE_TD_HOB ||
+             e->type == TDVF_SECTION_TYPE_TEMP_MEM) &&
+            e->address >= start && e->address < cut) {
+            cut = e->address;
+            first = e;
+        }
+    }
+    if (!first) {
+        tdx_emu_hob_resource(hob, start, end - start,
+                             EFI_RESOURCE_MEMORY_UNACCEPTED);
+        return;
+    }
+    tdx_emu_hob_resource(hob, start, cut - start,
+                         EFI_RESOURCE_MEMORY_UNACCEPTED);
+    tdx_emu_hob_resource(hob, first->address, MIN(first->size, end - cut),
+                         EFI_RESOURCE_SYSTEM_MEMORY);
+    if (first->address + first->size < end) {
+        tdx_emu_hob_ram(hob, fw, first->address + first->size, end);
+    }
+}
+
+static void tdx_emu_hob_create(TdxEmuState *tdx, TdxFirmwareEntry *td_hob)
+{
+    TdxFirmware *fw = tdx->fw;
+    g_autoptr(GByteArray) hob = g_byte_array_new();
+    EFI_HOB_HANDOFF_INFO_TABLE hit = {
+        .Header = { .HobType = EFI_HOB_TYPE_HANDOFF,
+                    .HobLength = cpu_to_le16(sizeof(hit)) },
+        .Version = cpu_to_le32(EFI_HOB_HANDOFF_TABLE_VERSION),
+    };
+    EFI_HOB_GENERIC_HEADER end = {
+        .HobType = EFI_HOB_TYPE_END_OF_HOB_LIST,
+        .HobLength = cpu_to_le16(sizeof(end)),
+    };
+    struct e820_entry *table;
+    int n = e820_get_table(&table);
+
+    tdx_emu_hob_add(hob, &hit, sizeof(hit));
+    for (int i = 0; i < n; i++) {
+        uint64_t start = le64_to_cpu(table[i].address);
+        uint64_t len = le64_to_cpu(table[i].length);
+
+        if (le32_to_cpu(table[i].type) != E820_RAM) {
+            continue;
+        }
+        tdx_emu_hob_ram(hob, fw, start, start + len);
+    }
+    tdx_emu_hob_add(hob, &end, sizeof(end));
+    hit.EfiEndOfHobList = cpu_to_le64(td_hob->address + hob->len);
+    memcpy(hob->data, &hit, sizeof(hit));
+    if (hob->len > td_hob->size) {
+        error_report("tdx-emu: the TD HOB (%u bytes) does not fit its section"
+                     " (%" PRIu64 " bytes)", hob->len, td_hob->size);
+        exit(1);
+    }
+    address_space_write(&address_space_memory, td_hob->address,
+                        MEMTXATTRS_UNSPECIFIED, hob->data, hob->len);
+}
+
+/*
+ * The launch (TDH.MEM.PAGE.ADD of the firmware sections, TDH.MR.FINALIZE):
+ * every page of RAM is private and pending until the TD accepts it, except
+ * the firmware image, the TD HOB and the temporary memory, which the VMM adds;
+ * the temporary memory is zeroed, the HOB written. Without TDVF metadata
+ * every page is treated as added.
+ */
+static void tdx_emu_init_done(Notifier *notifier, void *unused)
+{
+    TdxEmuState *tdx = container_of(notifier, TdxEmuState, init_done);
+    TdxFirmware *fw = tdx->fw;
+    TdxFirmwareEntry *e;
+    struct e820_entry *table;
+    int n = e820_get_table(&table);
+    uint64_t end = 4 * GiB;
+    g_autofree uint8_t *zero = NULL;
+
+    for (int i = 0; i < n; i++) {
+        uint64_t top = le64_to_cpu(table[i].address) +
+                       le64_to_cpu(table[i].length);
+
+        end = MAX(end, QEMU_ALIGN_UP(top, TARGET_PAGE_SIZE));
+    }
+    tdx->pages_end = end;
+    tdx->pages = g_malloc(end >> TARGET_PAGE_BITS);
+    memset(tdx->pages, fw ? TDX_PAGE_PENDING : TDX_PAGE_ACCEPTED,
+           end >> TARGET_PAGE_BITS);
+    if (!fw) {
+        return;
+    }
+    tdx_emu_set_page_state(tdx->fw_base, tdx->fw_size, TDX_PAGE_ACCEPTED);
+    zero = g_malloc0(TARGET_PAGE_SIZE);
+    for_each_tdx_fw_entry(fw, e) {
+        tdx_emu_set_page_state(e->address, e->size, TDX_PAGE_ACCEPTED);
+        if (e->type == TDVF_SECTION_TYPE_TEMP_MEM) {
+            for (uint64_t off = 0; off < e->size; off += TARGET_PAGE_SIZE) {
+                address_space_write(&address_space_memory, e->address + off,
+                                    MEMTXATTRS_UNSPECIFIED, zero,
+                                    MIN(TARGET_PAGE_SIZE, e->size - off));
+            }
+        } else if (e->type == TDVF_SECTION_TYPE_TD_HOB) {
+            tdx_emu_hob_create(tdx, e);
+        }
+    }
+}
+
 /*
  * The TSC frequency the TD sees: the CPU's tsc-frequency property, else the
  * rate of the host counter that TCG's guest TSC follows, measured once.
@@ -291,7 +547,7 @@ static void tdx_emu_cpu_instance_init(X86ConfidentialGuest *cg, CPUState *cpu)
 {
     object_property_set_bool(OBJECT(cpu), "pmu", false, &error_abort);
     object_property_set_bool(OBJECT(cpu), "monitor", false, &error_abort);
-    if (tdx_emu_state->tsc_khz == 0) {
+    if (X86_CPU(cpu)->env.tsc_khz) {
         tdx_emu_state->tsc_khz = X86_CPU(cpu)->env.tsc_khz;
     }
 }
@@ -309,6 +565,8 @@ static int tdx_emu_kvm_init(ConfidentialGuestSupport *cgs, Error **errp)
         return -1;
     }
     tdx_emu_state = tdx;
+    tdx->init_done.notify = tdx_emu_init_done;
+    qemu_add_machine_init_done_notifier(&tdx->init_done);
     cgs->ready = true;
     return 0;
 }
