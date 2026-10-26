@@ -1167,6 +1167,31 @@
    'features': ['confidential-guest-reset']}
 
 ##
+# @TdxEmuProperties:
+#
+# Properties for tdx-emu objects: a functional emulation of an Intel
+# TDX guest for TCG (CPUID leaf 0x21, TDCALL, #VE and the
+# TDG.VP.VMCALL interface), without attestation or memory protection.
+#
+# @gpaw: the guest physical address width, 48 or 52; the shared bit is
+#     bit gpaw-1 (default: 52)
+#
+# @sept-ve-disable: set the SEPT_VE_DISABLE attribute (default: true)
+#
+# @debug: set the DEBUG attribute (default: false)
+#
+# @strict: stop the VM on a protocol violation instead of failing the
+#     call (default: true)
+#
+# Since: 11.1
+##
+{ 'struct': 'TdxEmuProperties',
+  'data': { '*gpaw': 'uint32',
+            '*sept-ve-disable': 'bool',
+            '*debug': 'bool',
+            '*strict': 'bool' } }
+
+##
 # @ThreadContextProperties:
 #
 # Properties for thread context objects.
@@ -1314,6 +1339,7 @@
     'thread-context',
     's390-pv-guest',
     'tdx-guest',
+    'tdx-emu',
     'throttle-group',
     'tls-creds-anon',
     'tls-creds-psk',
@@ -1391,6 +1417,7 @@
       'sev-guest':                  'SevGuestProperties',
       'sev-snp-guest':              'SevSnpGuestProperties',
       'tdx-guest':                  'TdxGuestProperties',
+      'tdx-emu':                    'TdxEmuProperties',
       'thread-context':             'ThreadContextProperties',
       'throttle-group':             'ThrottleGroupProperties',
       'tls-creds-anon':             'TlsCredsAnonProperties',

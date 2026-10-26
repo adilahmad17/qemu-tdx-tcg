@@ -1503,6 +1503,7 @@ uint64_t x86_cpu_get_supported_feature_word(X86CPU *cpu, FeatureWord w);
 #define EXCP10_COPR     16
 #define EXCP11_ALGN     17
 #define EXCP12_MCHK     18
+#define EXCP14_VE       20 /* virtualization exception (Intel TDX) */
 
 #define EXCP_VMEXIT     0x100 /* only for system emulation */
 #define EXCP_SYSCALL    0x101 /* only for user emulation */
@@ -2212,6 +2213,24 @@ typedef struct CPUArchState {
     /* RAPL MSR */
     uint64_t msr_rapl_power_unit;
     uint64_t msr_pkg_energy_status;
+
+    /*
+     * Emulated TDX guest (tdx-emu): the information of the pending
+     * virtualization exception (TDG.VP.VEINFO.GET reads and clears it) and
+     * the per-vCPU CPUID #VE controls (TDG.VP.CPUIDVE.SET).
+     */
+    struct {
+        bool valid;
+        uint32_t exit_reason;
+        uint64_t exit_qual;
+        uint64_t gla;
+        uint64_t gpa;
+        uint32_t instr_len;
+        uint32_t instr_info;
+        uint8_t category;
+    } tdx_ve;
+    bool tdx_hlt_wait;          /* halted by TDG.VP.VMCALL<Instruction.HLT> */
+    uint8_t tdx_cpuid_ve;       /* bit 0: supervisor, bit 1: user */
 
     /* Fields up to this point are cleared by a CPU reset */
     struct {} end_reset_fields;

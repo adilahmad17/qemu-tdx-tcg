@@ -33,6 +33,7 @@
 #include "kvm/kvm_i386.h"
 #include "kvm/tdx.h"
 #include "sev.h"
+#include "tdx-emu.h"
 #include "qapi/error.h"
 #include "qemu/error-report.h"
 #include "qapi/qapi-visit-machine.h"
@@ -8618,6 +8619,7 @@ void cpu_x86_cpuid(CPUX86State *env, uint32_t index, uint32_t count,
     uint32_t signature[3];
     X86CPUTopoInfo *topo_info = &env->topo_info;
     uint32_t threads_per_pkg;
+    uint32_t orig_index = index;
 
     threads_per_pkg = x86_threads_per_pkg(topo_info);
 
@@ -9343,6 +9345,11 @@ void cpu_x86_cpuid(CPUX86State *env, uint32_t index, uint32_t count,
         *edx = 0;
         break;
     }
+
+    if (tdx_emu_enabled()) {
+        /* the leaf the guest asked for, before the clamp to the maximum */
+        tdx_emu_cpuid(env, orig_index, count, eax, ebx, ecx, edx);
+    }
 }
 
 static void x86_cpu_set_sgxlepubkeyhash(CPUX86State *env)
@@ -9532,6 +9539,10 @@ static void x86_cpu_reset_hold(Object *obj, ResetType type)
         qigvm_x86_bsp_reset(env);
     }
 #endif
+    if (tdx_emu_enabled()) {
+        /* a TD vCPU starts in the state TDH.VP.INIT gives it */
+        tdx_emu_cpu_reset(cpu);
+    }
 
     if (kvm_enabled()) {
         kvm_arch_reset_vcpu(cpu);
@@ -9553,6 +9564,10 @@ void x86_cpu_after_reset(X86CPU *cpu)
 
     if (cpu->apic_state) {
         device_cold_reset(DEVICE(cpu->apic_state));
+        if (tdx_emu_enabled()) {
+            /* the TDX module runs every TD vCPU with x2APIC enabled */
+            tdx_emu_apic_reset(cpu);
+        }
     }
 #endif
 }
@@ -10641,6 +10656,17 @@ int x86_cpu_pending_interrupt(CPUState *cs, int interrupt_request)
 
 static bool x86_cpu_has_work(CPUState *cs)
 {
+    CPUX86State *env = cpu_env(cs);
+
+    /*
+     * A TD halted through TDG.VP.VMCALL<Instruction.HLT> resumes on a pending
+     * interrupt whatever RFLAGS.IF says (the host VMM does not see IF), as
+     * KVM does; the guest's #VE handler returns and takes it.
+     */
+    if (env->tdx_hlt_wait && (cs->interrupt_request & CPU_INTERRUPT_HARD)) {
+        env->tdx_hlt_wait = false;
+        return true;
+    }
     return x86_cpu_pending_interrupt(cs, cs->interrupt_request) != 0;
 }
 #endif /* !CONFIG_USER_ONLY */

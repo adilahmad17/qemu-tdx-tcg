@@ -34,6 +34,7 @@
 #include "decode-new.h"
 
 #include "exec/log.h"
+#include "tdx-emu.h"
 
 #define HELPER_H "helper.h"
 #include "exec/helper-info.c.inc"
@@ -1807,6 +1808,51 @@ static void gen_far_jmp(DisasContext *s)
     s->base.is_jmp = DISAS_JUMP;
 }
 
+/*
+ * Emulated TDX guest: the instruction is one the TDX module turns into a
+ * virtualization exception (#VE) with this exit reason and qualification.
+ * The emulation state is fixed for the VM's lifetime, so it is a translation
+ * time constant; true when the exception was emitted.
+ */
+static bool gen_tdx_ve(DisasContext *s, uint32_t exit_reason, uint64_t qual)
+{
+#if defined(CONFIG_TDX_EMU) && !defined(CONFIG_USER_ONLY)
+    if (tdx_emu_enabled()) {
+        gen_update_cc_op(s);
+        gen_update_eip_cur(s);
+        gen_helper_tdx_ve(tcg_env, tcg_constant_i32(exit_reason),
+                          tcg_constant_i64(qual), cur_insn_len_i32(s));
+        s->base.is_jmp = DISAS_NORETURN;
+        return true;
+    }
+#endif
+    return false;
+}
+
+/* IN/OUT/INS/OUTS: the exit qualification carries the size, direction, port */
+static bool gen_tdx_ve_io(DisasContext *s, MemOp ot, TCGv_i32 port,
+                          bool in, bool string)
+{
+#if defined(CONFIG_TDX_EMU) && !defined(CONFIG_USER_ONLY)
+    if (tdx_emu_enabled()) {
+        uint32_t qual = (1 << ot) - 1;      /* bits 2:0: size - 1 */
+
+        qual |= in ? 1 << 3 : 0;            /* bit 3: IN */
+        qual |= string ? 1 << 4 : 0;        /* bit 4: string instruction */
+        if (string && (s->prefix & (PREFIX_REPZ | PREFIX_REPNZ))) {
+            qual |= 1 << 5;                 /* bit 5: REP prefix */
+        }
+        gen_update_cc_op(s);
+        gen_update_eip_cur(s);
+        gen_helper_tdx_ve_io(tcg_env, tcg_constant_i32(qual), port,
+                             tcg_constant_i32(0), cur_insn_len_i32(s));
+        s->base.is_jmp = DISAS_NORETURN;
+        return true;
+    }
+#endif
+    return false;
+}
+
 static void gen_svm_check_intercept(DisasContext *s, uint32_t type)
 {
     /* no SVM activated; fast case */
@@ -2836,6 +2882,15 @@ static void gen_multi0F(DisasContext *s, X86DecodedInsn *decode)
             gen_op_st_v(s, CODE64(s) + MO_32, s->T0, s->A0);
             break;
 
+#if defined(CONFIG_TDX_EMU) && !defined(CONFIG_USER_ONLY)
+        case 0xc1: /* VMCALL: not an instruction of TCG's CPUs; a TD sees #VE */
+            if (!tdx_emu_enabled()) {
+                goto illegal_op;
+            }
+            gen_tdx_ve(s, TDX_EXIT_REASON_VMCALL, 0);
+            break;
+#endif
+
         case 0xc8: /* monitor */
             if (!(s->cpuid_ext_features & CPUID_EXT_MONITOR) || CPL(s) != 0) {
                 goto illegal_op;
@@ -2873,6 +2928,18 @@ static void gen_multi0F(DisasContext *s, X86DecodedInsn *decode)
             gen_set_eflags(s, AC_MASK);
             s->base.is_jmp = DISAS_EOB_NEXT;
             break;
+
+#if defined(CONFIG_TDX_EMU) && !defined(CONFIG_USER_ONLY)
+        case 0xcc: /* TDCALL (66 0F 01 CC): only in an emulated TDX guest */
+            if (!(s->prefix & PREFIX_DATA) || !tdx_emu_enabled()) {
+                goto illegal_op;
+            }
+            gen_update_cc_op(s);
+            gen_update_eip_cur(s);
+            gen_helper_tdcall(tcg_env, cur_insn_len_i32(s));
+            s->base.is_jmp = DISAS_EOB_NEXT;
+            break;
+#endif
 
         CASE_MODRM_MEM_OP(1): /* sidt */
             if (s->flags & HF_UMIP_MASK && !check_cpl0(s)) {

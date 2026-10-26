@@ -15,6 +15,12 @@ config TDX
     select X86_FW_OVMF
     depends on KVM && X86_64
 
+config TDX_EMU
+    bool
+    default y
+    select X86_FW_OVMF
+    depends on TCG && X86_64
+
 config PC
     bool
     imply APPLESMC

@@ -15,3 +15,8 @@ kvm_sev_snp_launch_start(uint64_t policy, char *gosvw) "policy 0x%" PRIx64 " gos
 kvm_sev_snp_launch_update(uint64_t src, uint64_t gpa, uint64_t len, const char *type) "src 0x%" PRIx64 " gpa 0x%" PRIx64 " len 0x%" PRIx64 " (%s page)"
 kvm_sev_snp_launch_finish(char *id_block, char *id_auth, char *host_data) "id_block %s id_auth %s host_data %s"
 sev_handle_reset(void) ""
+
+# tdx-emu.c
+tdx_emu_tdcall(uint32_t leaf, uint64_t status) "leaf %u status 0x%" PRIx64
+tdx_emu_vmcall(uint64_t leaf, uint64_t status) "sub-function 0x%" PRIx64 " status 0x%" PRIx64
+tdx_emu_ve(uint32_t reason, uint64_t qual, uint32_t len, uint8_t category) "exit reason %u qualification 0x%" PRIx64 " length %u category 0x%x"

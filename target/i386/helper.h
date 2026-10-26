@@ -96,6 +96,13 @@ DEF_HELPER_FLAGS_2(monitor, TCG_CALL_NO_WG, void, env, tl)
 DEF_HELPER_FLAGS_2(mwait, TCG_CALL_NO_WG, noreturn, env, int)
 DEF_HELPER_1(rdmsr, void, env)
 DEF_HELPER_1(wrmsr, void, env)
+/* emulated TDX guest (tdx-emu) */
+DEF_HELPER_2(tdcall, void, env, int)
+DEF_HELPER_FLAGS_4(tdx_ve, TCG_CALL_NO_WG, noreturn, env, i32, i64, int)
+DEF_HELPER_FLAGS_5(tdx_ve_io, TCG_CALL_NO_WG, noreturn, env, i32, i32, i32, int)
+DEF_HELPER_2(tdx_cpuid, void, env, int)
+DEF_HELPER_2(tdx_rdmsr, i32, env, int)
+DEF_HELPER_2(tdx_wrmsr, i32, env, int)
 DEF_HELPER_FLAGS_1(read_cr8, TCG_CALL_NO_RWG, tl, env)
 DEF_HELPER_FLAGS_3(write_crN, TCG_CALL_NO_RWG, void, env, int, tl)
 #endif /* !CONFIG_USER_ONLY */

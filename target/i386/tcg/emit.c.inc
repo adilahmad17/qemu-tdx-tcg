@@ -1907,6 +1907,12 @@ static void gen_CPUID(DisasContext *s, X86DecodedInsn *decode)
 {
     gen_update_cc_op(s);
     gen_update_eip_cur(s);
+#if defined(CONFIG_TDX_EMU) && !defined(CONFIG_USER_ONLY)
+    if (tdx_emu_enabled()) {
+        /* the TDX module virtualizes some leaves and makes the rest #VE */
+        gen_helper_tdx_cpuid(tcg_env, cur_insn_len_i32(s));
+    }
+#endif
     gen_helper_cpuid(tcg_env);
 }
 
@@ -2053,6 +2059,9 @@ static void gen_HLT(DisasContext *s, X86DecodedInsn *decode)
 {
 #ifdef CONFIG_SYSTEM_ONLY
     gen_update_cc_op(s);
+    if (gen_tdx_ve(s, TDX_EXIT_REASON_HLT, 0)) {
+        return;
+    }
     gen_update_eip_next(s);
     gen_helper_hlt(tcg_env);
     s->base.is_jmp = DISAS_NORETURN;
@@ -2195,6 +2204,9 @@ static void gen_IN(DisasContext *s, X86DecodedInsn *decode)
     if (!gen_check_io(s, ot, port, SVM_IOIO_TYPE_MASK)) {
         return;
     }
+    if (gen_tdx_ve_io(s, ot, port, true, false)) {
+        return;
+    }
     translator_io_start(&s->base);
     gen_helper_in_func(ot, s->T0, port);
     gen_writeback(s, decode, 0, s->T0);
@@ -2224,6 +2236,9 @@ static void gen_INS(DisasContext *s, X86DecodedInsn *decode)
     tcg_gen_ext16u_i32(port, port);
     if (!gen_check_io(s, ot, port,
                       SVM_IOIO_TYPE_MASK | SVM_IOIO_STR_MASK)) {
+        return;
+    }
+    if (gen_tdx_ve_io(s, ot, port, true, true)) {
         return;
     }
 
@@ -2763,6 +2778,9 @@ static void gen_OUT(DisasContext *s, X86DecodedInsn *decode)
     if (!gen_check_io(s, ot, port, 0)) {
         return;
     }
+    if (gen_tdx_ve_io(s, ot, port, false, false)) {
+        return;
+    }
     tcg_gen_trunc_tl_i32(value, s->T0);
     translator_io_start(&s->base);
     gen_helper_out_func(ot, port, value);
@@ -2777,6 +2795,9 @@ static void gen_OUTS(DisasContext *s, X86DecodedInsn *decode)
     tcg_gen_trunc_tl_i32(port, s->T1);
     tcg_gen_ext16u_i32(port, port);
     if (!gen_check_io(s, ot, port, SVM_IOIO_STR_MASK)) {
+        return;
+    }
+    if (gen_tdx_ve_io(s, ot, port, false, true)) {
         return;
     }
 
@@ -3564,6 +3585,19 @@ static void gen_RDMSR(DisasContext *s, X86DecodedInsn *decode)
 {
     gen_update_cc_op(s);
     gen_update_eip_cur(s);
+#ifdef CONFIG_TDX_EMU
+    if (tdx_emu_enabled()) {
+        /* #VE, or the module's emulation, for the MSRs not passed through */
+        TCGv_i32 done = tcg_temp_new_i32();
+        TCGLabel *skip = gen_new_label();
+
+        gen_helper_tdx_rdmsr(done, tcg_env, cur_insn_len_i32(s));
+        tcg_gen_brcondi_i32(TCG_COND_NE, done, 0, skip);
+        gen_helper_rdmsr(tcg_env);
+        gen_set_label(skip);
+        return;
+    }
+#endif
     gen_helper_rdmsr(tcg_env);
 }
 #else
@@ -4707,6 +4741,18 @@ static void gen_WRMSR(DisasContext *s, X86DecodedInsn *decode)
 {
     gen_update_cc_op(s);
     gen_update_eip_cur(s);
+#ifdef CONFIG_TDX_EMU
+    if (tdx_emu_enabled()) {
+        TCGv_i32 done = tcg_temp_new_i32();
+        TCGLabel *skip = gen_new_label();
+
+        gen_helper_tdx_wrmsr(done, tcg_env, cur_insn_len_i32(s));
+        tcg_gen_brcondi_i32(TCG_COND_NE, done, 0, skip);
+        gen_helper_wrmsr(tcg_env);
+        gen_set_label(skip);
+        return;
+    }
+#endif
     gen_helper_wrmsr(tcg_env);
     s->base.is_jmp = DISAS_EOB_NEXT;
 }
@@ -4721,6 +4767,18 @@ static void gen_WRxxBASE(DisasContext *s, X86DecodedInsn *decode)
     /* Preserve hflags bits by testing CR4 at runtime.  */
     gen_helper_cr4_testbit(tcg_env, tcg_constant_i32(CR4_FSGSBASE_MASK));
     tcg_gen_mov_tl(base, s->T0);
+}
+
+static void gen_INVD(DisasContext *s, X86DecodedInsn *decode)
+{
+    /* nothing to invalidate; an emulated TDX guest sees the #VE */
+    gen_tdx_ve(s, TDX_EXIT_REASON_INVD, 0);
+}
+
+static void gen_WBINVD(DisasContext *s, X86DecodedInsn *decode)
+{
+    /* nothing to write back; an emulated TDX guest sees the #VE */
+    gen_tdx_ve(s, TDX_EXIT_REASON_WBINVD, 0);
 }
 
 static void gen_XADD(DisasContext *s, X86DecodedInsn *decode)
