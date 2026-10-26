@@ -45,7 +45,7 @@
 #include "accel/accel-cpu-ops.h"
 #include "accel/tcg/cpu-ops.h"
 #include "internal-common.h"
-
+#include "system/confidential-guest-support.h"
 
 struct TCGState {
     AccelState parent_obj;
@@ -177,6 +177,21 @@ static int tcg_init_machine(AccelState *as, MachineState *ms)
 
 #ifdef CONFIG_USER_ONLY
     qdev_create_fake_machine();
+#else
+    /*
+     * The emulated TDX guest is a confidential-guest-support object that
+     * KVM never sees: TCG starts it here, through the init method of its
+     * class, as the accelerator would on hardware.
+     */
+    if (ms->cgs && object_dynamic_cast(OBJECT(ms->cgs), "tdx-emu")) {
+        Error *local_err = NULL;
+        int ret = confidential_guest_kvm_init(ms->cgs, &local_err);
+
+        if (ret < 0) {
+            error_report_err(local_err);
+            return ret;
+        }
+    }
 #endif
 
     return 0;
