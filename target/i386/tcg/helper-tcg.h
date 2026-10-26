@@ -63,6 +63,12 @@ void x86_translate_code(CPUState *cs, TranslationBlock *tb,
 G_NORETURN void raise_exception(CPUX86State *env, int exception_index);
 G_NORETURN void raise_exception_ra(CPUX86State *env, int exception_index,
                                    uintptr_t retaddr);
+
+#ifndef CONFIG_USER_ONLY
+/* system/misc_helper.c: an MSR read or write without exceptions (false: #GP) */
+bool x86_rdmsr_core(CPUX86State *env, uint32_t index, uint64_t *pval);
+bool x86_wrmsr_core(CPUX86State *env, uint32_t index, uint64_t val);
+#endif
 G_NORETURN void raise_exception_err(CPUX86State *env, int exception_index,
                                     int error_code);
 G_NORETURN void raise_exception_err_ra(CPUX86State *env, int exception_index,
