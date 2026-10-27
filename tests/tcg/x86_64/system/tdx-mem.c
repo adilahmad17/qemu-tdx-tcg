@@ -31,9 +31,11 @@
 #define TDVMCALL_STATUS_GPA_INUSE       0x8000000000000001ULL
 
 #define SHARED_BIT      (1ULL << 47)    /* the default TD: GPAW 48 */
+#define WIDE_BIT        (1ULL << 51)    /* beyond GPAW 48 (phys-bits=52) */
 #define REGION_A        0x4000000ULL    /* 64 MiB: a shared 2 MiB region */
 #define REGION_B        0x4200000ULL    /* 66 MiB: made private again */
 #define REGION_C        0x4400000ULL    /* 68 MiB: accepted as 2 MiB */
+#define REGION_D        0x4600000ULL    /* 70 MiB: mapped with bit 51 */
 #define IOAPIC          0xfec00000ULL
 #define HPET            0xfed00000ULL
 
@@ -253,17 +255,22 @@ static uint64_t *pd_entry(uint64_t gpa)
     return &pd[(gpa >> 21) & 0x1ff];
 }
 
-static void map_shared_bit(uint64_t gpa, bool shared)
+static void map_bit(uint64_t gpa, uint64_t bit, bool set)
 {
     uint64_t *pde = pd_entry(gpa);
 
-    if (shared) {
-        *pde |= SHARED_BIT;
+    if (set) {
+        *pde |= bit;
     } else {
-        *pde &= ~SHARED_BIT;
+        *pde &= ~bit;
     }
     /* the whole 2 MiB mapping: flush its first page and the TLB with CR3 */
     asm volatile("mov %%cr3, %%rax; mov %%rax, %%cr3" : : : "rax", "memory");
+}
+
+static void map_shared_bit(uint64_t gpa, bool shared)
+{
+    map_bit(gpa, SHARED_BIT, shared);
 }
 
 static uint32_t mmio_read(uint64_t addr)
@@ -367,6 +374,19 @@ int main(void)
     CHECK(st == (TDX_OPERAND_INVALID | 1), "ACCEPT of MMIO: OPERAND_INVALID");
     st = accept(REGION_A, 0);
     CHECK(st == TDX_SUCCESS, "ACCEPT of a shared page: converted (strict would stop)");
+
+    /*
+     * A mapping with bit 51, the shared bit of a TD that takes it from a
+     * 52-bit width instead of GPAW 48: a GPA beyond GPAW, a #VE (the TD is
+     * not stopped, strict or not).
+     */
+    map_bit(REGION_D, WIDE_BIT, true);
+    before = ve_counts[EXIT_REASON_EPT];
+    v = mmio_read(REGION_D + 0x40);
+    CHECK(ve_counts[EXIT_REASON_EPT] == before + 1 && ve_last_category == 0 &&
+          ve_last_gpa == ((REGION_D + 0x40) | WIDE_BIT),
+          "an access to a GPA beyond GPAW: #VE with that GPA (%" PRIx64 ")", ve_last_gpa);
+    map_bit(REGION_D, WIDE_BIT, false);
 
     /* MMIO through a shared mapping: the IOAPIC */
     map_shared_bit(IOAPIC, true);

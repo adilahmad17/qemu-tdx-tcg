@@ -628,6 +628,14 @@ static uint64_t tdx_emu_vmcall(CPUX86State *env, uint64_t *r, int insn_len)
             return TDVMCALL_STATUS_ALIGN_ERROR;
         }
         gpa &= tdx_emu_gpa_mask();
+        /*
+         * A GPA bit at or above GPAW: not a GPA of the TD (KVM refuses it with
+         * INVALID_OPERAND); a TD that takes its shared bit from a wider width
+         * than GPAW (CPUID 0x80000008) gets this.
+         */
+        if (gpa >> tdx->gpaw) {
+            return TDVMCALL_STATUS_INVALID_OPERAND;
+        }
         if (gpa + size < gpa || gpa + size > tdx->pages_end) {
             return TDVMCALL_STATUS_INVALID_OPERAND;
         }
@@ -858,7 +866,8 @@ static uint64_t tdg_mem_page_accept(CPUX86State *env)
  * that would make the module or the VMM kill a real TD (a private mapping of
  * MMIO or of a shared page, a shared mapping of a private page, a pending
  * private page with PENDING_VE_DISABLE) stop the VM when strict, and are a
- * #VE otherwise. Returns the exception to raise, 0 for none.
+ * #VE otherwise; a GPA beyond GPAW is a #VE either way. Returns the exception
+ * to raise, 0 for none.
  */
 int tdx_emu_check_access(CPUX86State *env, vaddr addr, hwaddr paddr,
                          bool shared, MMUAccessType access_type)
@@ -872,7 +881,17 @@ int tdx_emu_check_access(CPUX86State *env, vaddr addr, hwaddr paddr,
     const char *what = NULL;
 
     trace_tdx_emu_access(paddr, shared, is_ram, state);
-    if (shared) {
+    if (paddr >> tdx->gpaw) {
+        /*
+         * A GPA bit at or above GPAW (bits the Secure EPT of a TD with this
+         * GPAW does not translate): the module injects a #VE for the EPT
+         * violation, it does not stop the TD. With no #VE handler the TD
+         * then triple-faults, as on real TDX hardware.
+         */
+        qemu_log_mask(LOG_GUEST_ERROR, "tdx-emu: an access to GPA 0x%" PRIx64
+                      " beyond GPAW %u (linear 0x%" PRIx64 "): #VE\n",
+                      (uint64_t)paddr, tdx->gpaw, (uint64_t)addr);
+    } else if (shared) {
         if (is_ram && state == TDX_PAGE_SHARED) {
             return 0;
         }

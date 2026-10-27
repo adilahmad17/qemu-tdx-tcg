@@ -585,6 +585,15 @@ int main(void)
     r = (struct tdcall_regs){ .r12 = SHARED_BIT | 0x29200000, .r13 = 0x1000 };
     st = tdvmcall(&r, TDVMCALL_MAP_GPA);
     CHECK(st == 0, "MapGPA of a shared page (shared bit 47): success");
+    /* the shared bit taken from a 52-bit width (CPUID 0x80000008) instead of GPAW */
+    r = (struct tdcall_regs){ .r12 = (1ULL << 51) | 0x29201000, .r13 = 0x1000 };
+    st = tdvmcall(&r, TDVMCALL_MAP_GPA);
+    CHECK(st == TDVMCALL_STATUS_INVALID_OPERAND,
+          "MapGPA with bit 51 (beyond GPAW 48) as the shared bit: INVALID_OPERAND");
+    r = (struct tdcall_regs){ .r12 = SHARED_BIT | (1ULL << 51) | 0x29201000, .r13 = 0x1000 };
+    st = tdvmcall(&r, TDVMCALL_MAP_GPA);
+    CHECK(st == TDVMCALL_STATUS_INVALID_OPERAND,
+          "MapGPA with bits 47 and 51: INVALID_OPERAND");
     /* the x2APIC id through the VMM: what a TD without ENUM_TOPOLOGY reads */
     r = (struct tdcall_regs){ .r12 = 0x802 };
     st = tdvmcall(&r, EXIT_REASON_MSR_READ);
