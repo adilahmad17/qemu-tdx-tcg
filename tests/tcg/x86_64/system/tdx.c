@@ -47,6 +47,9 @@
 #define TDVMCALL_MAP_GPA                0x10001
 #define TDVMCALL_GET_QUOTE              0x10002
 #define TDVMCALL_SETUP_EVENT_NOTIFY     0x10004
+
+/* the default TD: GPAW 48, the shared bit is bit 47 */
+#define SHARED_BIT                      (1ULL << 47)
 #define TDVMCALL_STATUS_INVALID_OPERAND 0x8000000000000000ULL
 #define TDVMCALL_STATUS_ALIGN_ERROR     0x8000000000000002ULL
 #define TDVMCALL_STATUS_SUBFUNC_UNSUPPORTED 0x8000000000000003ULL
@@ -392,8 +395,9 @@ int main(void)
     r = (struct tdcall_regs){ .rax = TDG_VP_INFO };
     tdcall(&r);
     CHECK(r.rax == TDX_SUCCESS, "TDG.VP.INFO succeeds");
-    CHECK((r.rcx & 0x3f) == 52, "TDG.VP.INFO: GPAW %" PRIu64, r.rcx & 0x3f);
-    CHECK(r.rdx & (1ULL << 28), "TDG.VP.INFO: SEPT_VE_DISABLE attribute (%" PRIx64 ")", r.rdx);
+    CHECK((r.rcx & 0x3f) == 48, "TDG.VP.INFO: GPAW %" PRIu64 " (default 48)", r.rcx & 0x3f);
+    CHECK(r.rdx == 0x50000000,
+          "TDG.VP.INFO: attributes SEPT_VE_DISABLE and PKS (%" PRIx64 ")", r.rdx);
     CHECK((uint32_t)r.r8 == 2 && (r.r8 >> 32) == 2,
           "TDG.VP.INFO: 2 vCPUs of 2 (%" PRIx64 ")", r.r8);
     CHECK(r.r9 == 0, "TDG.VP.INFO: vCPU index 0");
@@ -578,14 +582,19 @@ int main(void)
     r = (struct tdcall_regs){ .r12 = 0 };
     st = tdvmcall(&r, TDVMCALL_GET_TD_VM_CALL_INFO);
     CHECK(st == 0 && r.r11 == 0, "GetTdVmCallInfo: success, no optional sub-functions");
-    r = (struct tdcall_regs){ .r12 = (1ULL << 51) | 0x29200000, .r13 = 0x1000 };
+    r = (struct tdcall_regs){ .r12 = SHARED_BIT | 0x29200000, .r13 = 0x1000 };
     st = tdvmcall(&r, TDVMCALL_MAP_GPA);
-    CHECK(st == 0, "MapGPA of a shared page: success");
+    CHECK(st == 0, "MapGPA of a shared page (shared bit 47): success");
+    /* the x2APIC id through the VMM: what a TD without ENUM_TOPOLOGY reads */
+    r = (struct tdcall_regs){ .r12 = 0x802 };
+    st = tdvmcall(&r, EXIT_REASON_MSR_READ);
+    CHECK(st == 0 && r.r11 == 0,
+          "TDG.VP.VMCALL<Instruction.RDMSR> of MSR 0x802: x2APIC id %" PRIu64, r.r11);
     r = (struct tdcall_regs){ .r12 = 0x29200800, .r13 = 0x1000 };
     st = tdvmcall(&r, TDVMCALL_MAP_GPA);
     CHECK(st == TDVMCALL_STATUS_ALIGN_ERROR, "MapGPA of a misaligned range: ALIGN_ERROR");
     quote_buf[0] = 1;                       /* version */
-    r = (struct tdcall_regs){ .r12 = (1ULL << 51) | (uint64_t)quote_buf, .r13 = sizeof(quote_buf) };
+    r = (struct tdcall_regs){ .r12 = SHARED_BIT | (uint64_t)quote_buf, .r13 = sizeof(quote_buf) };
     st = tdvmcall(&r, TDVMCALL_GET_QUOTE);
     CHECK(st == 0 && *(volatile uint64_t *)(quote_buf + 8) == 0x8000000000000001ULL,
           "GetQuote: accepted, status QGS_UNAVAILABLE in the buffer");
@@ -672,7 +681,7 @@ int main(void)
     CHECK(ve_counts[EXIT_REASON_MSR_WRITE] == before + 1 && ve_last_category == 0x10,
           "WRMSR IA32_MISC_ENABLE: #VE of category 0x10");
 
-    /* x2APIC ID: a #VE until the TD enables the topology enumeration */
+    /* x2APIC ID: a #VE until the TD enables the topology enumeration (off by default) */
     before = ve_counts[EXIT_REASON_MSR_READ];
     v = rdmsr(0x802);
     CHECK(ve_counts[EXIT_REASON_MSR_READ] == before + 1 && ve_last_category == 0x10,

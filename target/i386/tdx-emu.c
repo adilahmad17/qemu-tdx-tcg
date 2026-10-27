@@ -646,10 +646,10 @@ static bool tdx_emu_get_enum_topology(Object *obj, Error **errp)
 }
 
 /*
- * The platform the Saguaro TDX PAL runs on gives the TD its x2APIC ids
- * through MSR 0x802 and CPUID 0xB without the TD asking for it, which in the
- * public module source needs TD_CTLS.ENUM_TOPOLOGY: it is on at creation by
- * default here; enum-topology=off is the public module's initial state.
+ * TD_CTLS.ENUM_TOPOLOGY at creation: with it, MSR 0x802 and CPUID 0xB give
+ * the x2APIC ids without a #VE. Off by default, as on real TDX hardware,
+ * where it is not set at creation: the TD reads its x2APIC id through
+ * TDG.VP.VMCALL<Instruction.RDMSR> or enables the enumeration itself.
  */
 static void tdx_emu_set_enum_topology(Object *obj, bool value, Error **errp)
 {
@@ -672,10 +672,16 @@ static void tdx_emu_init(Object *obj)
 {
     TdxEmuState *tdx = TDX_EMU(obj);
 
-    tdx->gpaw = 52;
-    tdx->attributes = TDX_EMU_ATTR_SEPT_VE_DISABLE;
-    tdx->td_ctls = TDX_TD_CTLS_PENDING_VE_DISABLE | TDX_TD_CTLS_ENUM_TOPOLOGY;
-    tdx->enum_topology = true;
+    /*
+     * The defaults are what TDG.VP.INFO reports on real TDX hardware: GPAW 48
+     * (the shared bit is bit 47, whatever width CPUID 0x80000008 and so the
+     * td-shim HOB report), the attributes SEPT_VE_DISABLE and PKS, and no
+     * topology enumeration.
+     */
+    tdx->gpaw = 48;
+    tdx->attributes = TDX_EMU_ATTR_SEPT_VE_DISABLE | TDX_EMU_ATTR_PKS;
+    tdx->td_ctls = TDX_TD_CTLS_PENDING_VE_DISABLE;
+    tdx->enum_topology = false;
     tdx->strict = true;
     tdx->event_notify_vector = -1;
     tdx->event_notify_apicid = -1;
@@ -693,10 +699,14 @@ static void tdx_emu_class_init(ObjectClass *oc, const void *data)
     object_class_property_add(oc, "gpaw", "uint32", tdx_emu_get_gpaw,
                               tdx_emu_set_gpaw, NULL, NULL);
     object_class_property_set_description(oc, "gpaw",
-        "guest physical address width, 48 or 52 (the shared bit is gpaw-1)");
+        "guest physical address width, 48 or 52 (the shared bit is gpaw-1; "
+        "default 48)");
     object_class_property_add_bool(oc, "sept-ve-disable",
                                    tdx_emu_get_sept_ve_disable,
                                    tdx_emu_set_sept_ve_disable);
+    object_class_property_set_description(oc, "sept-ve-disable",
+        "ATTRIBUTES.SEPT_VE_DISABLE: no #VE for a page the TD has not "
+        "accepted (default on)");
     object_class_property_add_bool(oc, "debug", tdx_emu_get_debug,
                                    tdx_emu_set_debug);
     object_class_property_add_bool(oc, "strict", tdx_emu_get_strict,
@@ -708,7 +718,7 @@ static void tdx_emu_class_init(ObjectClass *oc, const void *data)
                                    tdx_emu_set_enum_topology);
     object_class_property_set_description(oc, "enum-topology",
         "TD_CTLS.ENUM_TOPOLOGY at creation: x2APIC ids through MSR 0x802 and "
-        "CPUID 0xB (default on; off is the public module's initial state)");
+        "CPUID 0xB without a #VE (default off, as on real TDX hardware)");
 }
 
 static const TypeInfo tdx_emu_info = {

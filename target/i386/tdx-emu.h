@@ -47,6 +47,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(TdxEmuState, TDX_EMU)
 /* TD attributes (TDX Module ABI, TD_PARAMS.ATTRIBUTES) */
 #define TDX_EMU_ATTR_DEBUG              (1ULL << 0)
 #define TDX_EMU_ATTR_SEPT_VE_DISABLE    (1ULL << 28)
+#define TDX_EMU_ATTR_PKS                (1ULL << 30)
 
 /* TDCS.TD_CTLS */
 #define TDX_TD_CTLS_PENDING_VE_DISABLE  (1ULL << 0)

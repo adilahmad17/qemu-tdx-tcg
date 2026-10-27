@@ -22,13 +22,15 @@
 #define TDX_PAGE_ALREADY_ACCEPTED       0x00000B0A00000000ULL
 #define TDX_PAGE_SIZE_MISMATCH          0xC0000B0B00000000ULL
 
+#define EXIT_REASON_CPUID       10
 #define EXIT_REASON_IO          30
+#define EXIT_REASON_MSR_READ    31
 #define EXIT_REASON_EPT         48
 
 #define TDVMCALL_MAP_GPA                0x10001
 #define TDVMCALL_STATUS_GPA_INUSE       0x8000000000000001ULL
 
-#define SHARED_BIT      (1ULL << 51)
+#define SHARED_BIT      (1ULL << 47)    /* the default TD: GPAW 48 */
 #define REGION_A        0x4000000ULL    /* 64 MiB: a shared 2 MiB region */
 #define REGION_B        0x4200000ULL    /* 66 MiB: made private again */
 #define REGION_C        0x4400000ULL    /* 68 MiB: accepted as 2 MiB */
@@ -163,6 +165,15 @@ void ve_handler_c(struct ve_regs *regs)
         }
         break;
     }
+    case EXIT_REASON_CPUID:
+    case EXIT_REASON_MSR_READ:
+        /* the topology check: counted, zeros returned */
+        regs->rax = regs->rdx = 0;
+        if (reason == EXIT_REASON_CPUID) {
+            regs->rbx = regs->rcx = 0;
+        }
+        regs->rip += (uint32_t)r.r10;
+        break;
     default:
         ve_unexpected++;
         regs->rip += (uint32_t)r.r10;
@@ -292,16 +303,17 @@ int main(void)
 #endif
     ml_printf("tdx-mem: emulated TDX memory test\n");
 
-    /* the default TD: topology enumeration on (x2APIC id without a #VE) */
+    /* the default TD: no topology enumeration (MSR 0x802 and CPUID.0xB are a #VE) */
     {
         uint32_t lo, hi, a, b, c, d;
 
-        before = ve_counts[31];
+        before = ve_counts[EXIT_REASON_MSR_READ];
         asm volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(0x802));
         asm volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d)
                      : "a"(0xb), "c"(0));
-        CHECK(ve_counts[31] == before && ve_counts[10] == 0 && lo == 0 && d == 0,
-              "enum-topology (default on): MSR 0x802 and CPUID.0xB give the x2APIC id, no #VE");
+        CHECK(ve_counts[EXIT_REASON_MSR_READ] == before + 1 &&
+              ve_counts[EXIT_REASON_CPUID] == 1 && ve_last_category == 0x10,
+              "enum-topology (default off): MSR 0x802 and CPUID.0xB raise a #VE");
     }
 
     /* a shared region: MapGPA, then mapped with the shared bit */
