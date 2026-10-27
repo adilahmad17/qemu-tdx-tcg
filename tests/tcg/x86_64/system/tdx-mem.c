@@ -90,6 +90,16 @@ static uint64_t accept(uint64_t gpa, unsigned level)
     return r.rax;
 }
 
+/* console output straight through TDG.VP.VMCALL<Instruction.IO> (no #VE) */
+static __attribute__((unused)) void early_print(const char *s)
+{
+    for (; *s; s++) {
+        struct tdcall_regs r = { .r12 = 1, .r13 = 1, .r14 = 0xe9, .r15 = (uint8_t)*s };
+
+        tdvmcall(&r, EXIT_REASON_IO);
+    }
+}
+
 /* ---- #VE handler: console I/O, MMIO through the VMM, pending pages ---- */
 
 struct ve_regs {
@@ -299,6 +309,21 @@ int main(void)
     unsigned before;
     uint32_t v;
 
+#ifdef TDX_EARLY_VE_TEST
+    /*
+     * A #VE before the TD has an IDT (boot.S loads one without gates): the
+     * delivery faults, the #DF too, and the vCPU triple-faults: the VM
+     * resets, as on real TDX hardware (-no-reboot: QEMU exits).
+     */
+    early_print("tdx-early-ve: RDMSR 0x802 before an IDT: the TD must triple-fault\n");
+    {
+        uint32_t lo, hi;
+
+        asm volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(0x802));
+    }
+    early_print("tdx-early-ve: FAIL the TD went on\n");
+    return 1;
+#endif
     idt_init();
 #ifdef TDX_MEM_STRICT_TEST
     ml_printf("tdx-mem-strict: an access to a pending page must stop the VM\n");

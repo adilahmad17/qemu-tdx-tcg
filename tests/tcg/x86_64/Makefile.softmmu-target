@@ -41,7 +41,7 @@ QEMU_OPTS+=-device isa-debugcon,chardev=output -device isa-debug-exit,iobase=0xf
 # RAM. The tests are built without the red zone, as a guest that takes
 # exceptions must be. The test binary that the generic rule appends becomes
 # the VM name.
-TDX_TESTS=tdx tdx-mem tdx-mem-strict
+TDX_TESTS=tdx tdx-mem tdx-mem-strict tdx-early-ve
 $(TDX_TESTS): CFLAGS+=-mno-red-zone
 
 %-bios.bin: % $(X64_SYSTEM_SRC)/mktdxbios.py
@@ -78,6 +78,16 @@ run-tdx-mem-strict: tdx-mem-strict tdx-mem-strict-bios.bin
 		-object tdx-emu$(COMMA)id=tdx0 -bios tdx-mem-strict-bios.bin \
 		-device loader$(COMMA)file=tdx-mem-strict -name $@)
 run-plugin-tdx-mem-strict-with-%:
+	@true
+
+# a #VE before the TD has an IDT: a triple fault, the VM resets (-no-reboot: QEMU exits 0)
+run-tdx-early-ve: tdx-early-ve tdx-early-ve-bios.bin
+	$(call run-test, $@, $(X64_SYSTEM_SRC)/tdx-expect-reset.sh $@.out $@.log "before an IDT" \
+		$(QEMU) -monitor none -display none \
+		-chardev file$(COMMA)path=$@.out$(COMMA)id=output $(TDX_QEMU_OPTS) \
+		-object tdx-emu$(COMMA)id=tdx0 -bios tdx-early-ve-bios.bin \
+		-device loader$(COMMA)file=tdx-early-ve -name $@)
+run-plugin-tdx-early-ve-with-%:
 	@true
 
 # td-shim boots the emulated TD from its firmware image and hands over to a
