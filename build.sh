@@ -96,4 +96,4 @@ echo
 echo "Use it (keep the binary where it is: it finds its ROMs in ../share/qemu):"
 echo "  $Q -accel tcg -M q35,confidential-guest-support=tdx0 -object tdx-emu,id=tdx0 -cpu max -bios <td-shim image> ..."
 echo "  with Saguaro: export SAGUARO_ACCEL=tcg QEMU_PATH=$Q"
-echo "  tests: make -C $BUILD/tests/tcg/x86_64-softmmu run-tdx run-tdx-mem run-tdx-mem-strict"
+echo "  tests: make -C $BUILD/tests/tcg/x86_64-softmmu run-tdx run-tdx-mem run-tdx-mem-strict run-tdx-early-ve"

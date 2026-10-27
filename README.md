@@ -16,6 +16,11 @@ a series of commits on top of it.
   `strict`, `enum-topology`). The TD boots from its firmware (td-shim, TDVF) at the TDX reset vector,
   with the initial vCPU state the TDX module gives (32-bit flat mode, EFER.LME, RBX = GPAW, RSI = vCPU
   index) and x2APIC enabled. TCG initialises the object when the machine starts.
+- The defaults follow what a TD sees on real TDX hardware: `gpaw` 48 (TDG.VP.INFO; the shared bit is
+  bit 47, independently of the width that CPUID 0x80000008 reports, e.g. 52 with `-cpu
+  max,phys-bits=52`), `sept-ve-disable` on, the TD attributes SEPT_VE_DISABLE and PKS (0x50000000), and
+  `enum-topology` off (MSR 0x802 and CPUID leaf 0xB raise a `#VE`; the x2APIC ID is available through
+  TDG.VP.VMCALL<Instruction.RDMSR>).
 - Guest-visible state: CPUID leaf 0x21 and the module's CPUID virtualization (fixed bits, leaf 0x15 with
   the TSC frequency, the TD_CTLS controls, the TSC-deadline timer), the TDX module's MSR classification.
 - `TDCALL`: TDG.VP.INFO, VEINFO.GET, VM.RD/WR, VP.RD/WR, CPUIDVE.SET, MEM.PAGE.ACCEPT, MR.RTMR.EXTEND,
@@ -23,10 +28,14 @@ a series of commits on top of it.
   (CPUID, HLT, IO, RDMSR/WRMSR, MMIO, GetTdVmCallInfo, MapGPA, GetQuote as "no quote service",
   ReportFatalError, SetupEventNotifyInterrupt).
 - `#VE` (vector 20) for the CPUID leaves, MSRs, port I/O, HLT, INVD, WBINVD and VMCALL the module does
-  not virtualize; `#DF` when the previous one was not consumed.
+  not virtualize; `#DF` when the previous one was not consumed. A `#VE` that the TD cannot deliver (no
+  usable IDT) ends in a triple fault and a reset of the VM, as on the hardware; with `-no-reboot` QEMU
+  exits, and QMP reports `SHUTDOWN` with the reason `guest-reset`.
 - The shared bit in the page tables, MapGPA, page acceptance, MMIO as `#VE`, and the launch from the TD
   firmware (td-shim, TDVF) with the TD HOB; `strict=on` (the default) stops the VM where a real TD would
   be killed (an access to a page it has not accepted, for example), `strict=off` continues with a `#VE`.
+  An access to a GPA with a bit at or above GPAW set (other than the shared bit) is a `#VE` (an EPT
+  violation), strict or not; MapGPA of such a GPA returns INVALID_OPERAND.
 - The build is x86_64 system emulation with TCG only (`CONFIG_TDX_EMU`, independent of KVM).
 
 ## Build
@@ -41,10 +50,11 @@ how to use the result. The binary stays where it was installed: it finds its ROM
 ## Tests
 
 The emulation is tested by small TDX guests in `tests/tcg/x86_64/system/`: `tdx.c` (the TDCALL and
-`#VE` interface), `tdx-mem.c` and `tdx-mem-strict.c` (the shared bit, MapGPA and page acceptance),
+`#VE` interface, the defaults), `tdx-mem.c` and `tdx-mem-strict.c` (the shared bit, MapGPA, page
+acceptance, an access beyond GPAW), `tdx-early-ve.c` (a `#VE` before the TD has an IDT resets the VM),
 built around a reset-vector stub by `mktdxbios.py`, and `tdx-payload.c`, a payload for td-shim.
 
-    make -C build/tests/tcg/x86_64-softmmu run-tdx run-tdx-mem run-tdx-mem-strict
+    make -C build/tests/tcg/x86_64-softmmu run-tdx run-tdx-mem run-tdx-mem-strict run-tdx-early-ve
     make -C build/tests/tcg/x86_64-softmmu TD_SHIM_DIR=<td-shim>/target/x86_64-unknown-none/release \
         TD_SHIM_LD=<td-shim>/target/release/td-shim-ld run-tdx-shim
 
